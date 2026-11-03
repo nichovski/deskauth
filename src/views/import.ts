@@ -25,7 +25,9 @@ export function progressText(p: ImportProgress): string {
   if (p.batch_size && p.batch_size > 1) {
     return `batch ${p.batches_seen.length} of ${p.batch_size} scanned, ${ready}`;
   }
-  return p.accounts ? ready : "";
+  if (p.accounts) return ready;
+  if (p.skipped_unsupported) return `No supported accounts in this QR (${p.skipped_unsupported} skipped)`;
+  return "";
 }
 
 type Mode = "camera" | "image";

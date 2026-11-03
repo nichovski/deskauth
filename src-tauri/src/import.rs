@@ -1,13 +1,16 @@
 use crate::account::Account;
 use crate::migration::parse_uri;
 use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ImportProgress {
     pub batches_seen: Vec<u32>,
     pub batch_size: Option<u32>,
     pub accounts: usize,
+    pub skipped_unsupported: usize,
     pub complete: bool,
 }
 
@@ -18,6 +21,8 @@ pub struct ImportSession {
     seen: BTreeSet<u32>,
     accounts: Vec<Account>,
     skipped_unsupported: usize,
+    /// Hashes of non-batched QR contents already counted, so a QR held in view is not counted again.
+    seen_plain: BTreeSet<u64>,
 }
 
 impl ImportSession {
@@ -34,8 +39,12 @@ impl ImportSession {
                 }
             }
             None => {
-                self.accounts.extend(parsed.accounts);
-                self.skipped_unsupported += parsed.skipped_unsupported;
+                let mut hasher = DefaultHasher::new();
+                uri.hash(&mut hasher);
+                if self.seen_plain.insert(hasher.finish()) {
+                    self.accounts.extend(parsed.accounts);
+                    self.skipped_unsupported += parsed.skipped_unsupported;
+                }
             }
         }
         Ok(self.progress())
@@ -50,6 +59,7 @@ impl ImportSession {
             batches_seen: self.seen.iter().copied().collect(),
             batch_size: self.batch_size,
             accounts: self.accounts.len(),
+            skipped_unsupported: self.skipped_unsupported,
             complete,
         }
     }
@@ -163,6 +173,26 @@ mod tests {
         s.add_uri(&hotp(0)).unwrap();
         s.add_uri(&hotp(1)).unwrap();
         assert_eq!(s.take().1, 2);
+    }
+
+    #[test]
+    fn same_plain_qr_is_counted_once() {
+        let mut s = ImportSession::default();
+        let hotp = "otpauth-migration://offline?data=".to_string() + &{
+            let p = Payload {
+                otp_parameters: vec![Otp { secret: b"h".to_vec(), name: "n".into(), issuer: "i".into(), algorithm: 1, digits: 1, r#type: 1, counter: 0 }],
+                version: 1, batch_size: 0, batch_index: 0, batch_id: 0,
+            };
+            let d = base64::engine::general_purpose::STANDARD.encode(p.encode_to_vec());
+            d.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D")
+        };
+        for _ in 0..5 {
+            s.add_uri(&hotp).unwrap();
+        }
+        let plain = "otpauth://totp/Acme:me?secret=JBSWY3DPEHPK3PXP&issuer=Acme";
+        s.add_uri(plain).unwrap();
+        let p = s.add_uri(plain).unwrap();
+        assert_eq!((p.accounts, p.skipped_unsupported), (1, 1));
     }
 
     #[test]

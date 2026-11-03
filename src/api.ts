@@ -17,6 +17,7 @@ export interface ImportProgress {
   batches_seen: number[];
   batch_size: number | null;
   accounts: number;
+  skipped_unsupported: number;
   complete: boolean;
 }
 
