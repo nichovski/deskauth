@@ -48,9 +48,8 @@ pub fn run() {
                 loop {
                     std::thread::sleep(AUTO_LOCK_CHECK_EVERY);
                     let state = handle.state::<AppState>();
-                    let idle = state.last_activity.lock().unwrap().elapsed();
                     let unlocked = state.vault.lock().unwrap().is_some();
-                    if unlocked && idle > AUTO_LOCK_AFTER {
+                    if unlocked && state.idle_expired(AUTO_LOCK_AFTER) {
                         commands::lock(&state);
                         let _ = handle.emit("locked", ());
                     }

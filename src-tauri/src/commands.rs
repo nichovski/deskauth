@@ -19,7 +19,7 @@ const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 pub struct AppState {
     pub vault: Mutex<Option<Vault>>,
     pub vault_path: PathBuf,
-    pub last_activity: Mutex<Instant>,
+    pub last_activity: Mutex<(Instant, SystemTime)>,
     /// One clipboard for the app lifetime: on Wayland the content can vanish when it is dropped.
     /// None when no clipboard is available (e.g. no display server).
     pub clipboard: Mutex<Option<arboard::Clipboard>>,
@@ -32,7 +32,7 @@ impl AppState {
         AppState {
             vault: Mutex::new(None),
             vault_path,
-            last_activity: Mutex::new(Instant::now()),
+            last_activity: Mutex::new((Instant::now(), SystemTime::now())),
             clipboard: Mutex::new(arboard::Clipboard::new().ok()),
             import: Mutex::new(ImportSession::default()),
             camera: Mutex::new(None),
@@ -40,8 +40,19 @@ impl AppState {
     }
 
     fn touch(&self) {
-        *self.last_activity.lock().unwrap() = Instant::now();
+        *self.last_activity.lock().unwrap() = (Instant::now(), SystemTime::now());
     }
+
+    /// Instant stops while the system sleeps, so the wall clock is checked as well.
+    pub fn idle_expired(&self, limit: Duration) -> bool {
+        let (instant, wall) = *self.last_activity.lock().unwrap();
+        idle_expired(instant.elapsed(), SystemTime::now().duration_since(wall).ok(), limit)
+    }
+}
+
+/// True when either clock says the idle limit has passed. A wall clock that went backwards (None) counts as 0.
+fn idle_expired(instant_elapsed: Duration, wall_elapsed: Option<Duration>, limit: Duration) -> bool {
+    instant_elapsed > limit || wall_elapsed.unwrap_or_default() > limit
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -539,6 +550,20 @@ mod tests {
         assert_eq!(f.error.as_deref(), Some(NOT_SUPPORTED));
         let f = camera_frame(&mut session, Err(camera::NOT_AVAILABLE.into()));
         assert_eq!((f.preview.as_str(), f.error.as_deref()), ("", Some("Camera not available")));
+    }
+
+    #[test]
+    fn idle_expires_on_either_clock() {
+        let limit = Duration::from_secs(300);
+        let secs = Duration::from_secs;
+        assert!(!idle_expired(secs(10), Some(secs(10)), limit));
+        assert!(!idle_expired(secs(300), Some(secs(300)), limit));
+        assert!(idle_expired(secs(301), Some(secs(10)), limit));
+        // Suspend: Instant barely moved, the wall clock jumped.
+        assert!(idle_expired(secs(10), Some(secs(3600)), limit));
+        // Wall clock went backwards: treated as 0.
+        assert!(!idle_expired(secs(10), None, limit));
+        assert!(idle_expired(secs(301), None, limit));
     }
 
     #[test]
