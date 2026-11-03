@@ -1,6 +1,6 @@
 # Deskauth
 
-A desktop TOTP authenticator. It imports your accounts from Google Authenticator and shows the 6-digit codes on your computer. Built with Tauri 2 (Rust backend, TypeScript UI). MIT license.
+A desktop TOTP authenticator. It imports your accounts from Google Authenticator and shows the 6 or 8 digit codes on your computer. Built with Tauri 2 (Rust backend, TypeScript UI). MIT license.
 
 Not affiliated with Google.
 
@@ -54,7 +54,7 @@ If your Rust or Node come from rustup or mise (not pacman), run `makepkg -fid` i
 
 ## Releases
 
-Pushing a `v*` tag builds unsigned packages (Linux AppImage and .deb, Windows .msi, macOS .dmg) and attaches them to a draft GitHub release.
+Pushing a `v*` tag builds unsigned packages (bundle targets are "all", so Linux gets AppImage, .deb and .rpm, Windows gets .msi and the NSIS .exe installer, macOS gets .dmg) and attaches them to a draft GitHub release.
 
 macOS will warn that the app is from an unidentified developer because the release is not signed. To open it: right-click the app, choose Open, then confirm. Windows may show a SmartScreen warning for the same reason.
 
