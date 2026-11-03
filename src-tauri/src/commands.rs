@@ -156,6 +156,17 @@ pub fn codes(state: State<AppState>) -> Result<Vec<CodeView>, String> {
     Ok(code_views(&v.accounts, unix_now()))
 }
 
+/// Copies text and asks clipboard managers to keep it out of their history.
+fn set_text_private(clip: &mut arboard::Clipboard, text: String) -> Result<(), arboard::Error> {
+    #[cfg(windows)]
+    use arboard::SetExtWindows as _;
+    #[cfg(target_os = "macos")]
+    use arboard::SetExtApple as _;
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))))]
+    use arboard::SetExtLinux as _;
+    clip.set().exclude_from_history().text(text)
+}
+
 #[tauri::command]
 pub fn copy_code(id: String, app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let code = {
@@ -172,7 +183,7 @@ pub fn copy_code(id: String, app: AppHandle, state: State<AppState>) -> Result<(
     {
         let mut clip = state.clipboard.lock().unwrap();
         let clip = clip.as_mut().ok_or("Clipboard not available")?;
-        clip.set_text(code.clone()).map_err(|e| e.to_string())?;
+        set_text_private(clip, code.clone()).map_err(|e| e.to_string())?;
     }
     std::thread::spawn(move || {
         std::thread::sleep(CLIPBOARD_CLEAR_AFTER);
