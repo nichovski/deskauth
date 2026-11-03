@@ -227,11 +227,10 @@ impl Vault {
         write_atomic(&self.path, &out)
     }
 
-    pub fn change_password(&mut self, new_password: &str) -> Result<(), VaultError> {
-        let salt = random_bytes::<SALT_LEN>();
-        let key = derive_key(new_password, &salt)?;
-        let old_key = std::mem::replace(&mut self.key, key);
-        let old_salt = std::mem::replace(&mut self.salt, salt);
+    /// Swaps in a key made by `derive_new_key` and saves. On a failed save the old key comes back.
+    pub fn apply_new_key(&mut self, new: NewKey) -> Result<(), VaultError> {
+        let old_key = std::mem::replace(&mut self.key, new.key);
+        let old_salt = std::mem::replace(&mut self.salt, new.salt);
         if let Err(e) = self.save() {
             self.key = old_key;
             self.salt = old_salt;
@@ -239,6 +238,18 @@ impl Vault {
         }
         Ok(())
     }
+}
+
+/// A fresh salt and the key derived from it. Made without the vault, so the slow KDF needs no lock.
+pub struct NewKey {
+    key: Zeroizing<[u8; KEY_LEN]>,
+    salt: [u8; SALT_LEN],
+}
+
+pub fn derive_new_key(new_password: &str) -> Result<NewKey, VaultError> {
+    let salt = random_bytes::<SALT_LEN>();
+    let key = derive_key(new_password, &salt)?;
+    Ok(NewKey { key, salt })
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
@@ -358,11 +369,25 @@ mod tests {
         v.accounts.push(sample());
         v.save().unwrap();
         let salt1 = read_json(&p)["kdf"]["salt"].as_str().unwrap().to_string();
-        v.change_password("new").unwrap();
+        v.apply_new_key(derive_new_key("new").unwrap()).unwrap();
         let salt2 = read_json(&p)["kdf"]["salt"].as_str().unwrap().to_string();
         assert_ne!(salt1, salt2);
         assert_eq!(unlock(&p, "old").err(), Some(VaultError::WrongPassword));
         assert_eq!(unlock(&p, "new").unwrap().accounts.len(), 1);
+    }
+
+    #[test]
+    fn failed_apply_keeps_old_key() {
+        let (d, p) = setup();
+        let mut v = create(&p, "old").unwrap();
+        let new = derive_new_key("new").unwrap();
+        std::fs::remove_file(&p).unwrap();
+        std::fs::remove_dir(d.path()).unwrap();
+        assert!(v.apply_new_key(new).is_err());
+        std::fs::create_dir(d.path()).unwrap();
+        v.save().unwrap();
+        assert!(unlock(&p, "old").is_ok());
+        assert_eq!(unlock(&p, "new").err(), Some(VaultError::WrongPassword));
     }
 
     #[test]

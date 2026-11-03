@@ -433,7 +433,7 @@ pub fn account_delete(id: String, state: State<AppState>) -> Result<(), String> 
     Ok(())
 }
 
-// Async so both Argon2 runs (verify, then derive) stay off the main thread.
+// Async so both Argon2 runs (verify, then derive) stay off the main thread; neither holds the vault lock.
 #[tauri::command]
 pub async fn vault_change_password(
     current: String,
@@ -443,10 +443,12 @@ pub async fn vault_change_password(
     ensure_unlocked(&state)?;
     // Verify against the file without holding the vault lock; the copy is dropped (and wiped) right away.
     drop(vault::unlock(&state.vault_path, &current).map_err(|e| e.to_string())?);
+    // Derived before the vault lock is taken, so the slow KDF does not block other commands.
+    let new_key = vault::derive_new_key(&new_password).map_err(|e| e.to_string())?;
     {
         let mut guard = state.vault.lock().unwrap();
         let v = guard.as_mut().ok_or(LOCKED)?;
-        v.change_password(&new_password).map_err(|e| e.to_string())?;
+        v.apply_new_key(new_key).map_err(|e| e.to_string())?;
     }
     state.touch();
     Ok(())
