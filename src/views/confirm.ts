@@ -39,6 +39,8 @@ export function confirmDialog(message: string, confirmLabel: string): Promise<bo
     overlay.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Enter") {
+        // On a focused button, let its own click run so Cancel cancels and Confirm confirms.
+        if (e.target instanceof HTMLButtonElement) return;
         e.preventDefault();
         close(true);
       } else if (e.key === "Escape") {
