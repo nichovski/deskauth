@@ -49,3 +49,10 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# Keep the vault KDF tests fast in debug builds without weakening the parameters.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
