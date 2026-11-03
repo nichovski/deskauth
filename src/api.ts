@@ -63,6 +63,13 @@ export const accountAddManual = (
   period: number,
 ) => invoke<void>("account_add_manual", { issuer, name, secret, algorithm, digits, period });
 
+export const accountRename = (id: string, issuer: string, name: string) =>
+  invoke<void>("account_rename", { id, issuer, name });
+export const accountDelete = (id: string) => invoke<void>("account_delete", { id });
+export const vaultChangePassword = (current: string, newPassword: string) =>
+  invoke<void>("vault_change_password", { current, newPassword });
+export const vaultReset = () => invoke<void>("vault_reset");
+
 export const onLocked = (cb: () => void): Promise<UnlistenFn> => listen("locked", () => cb());
 export const onTheme = (cb: (p: Palette) => void): Promise<UnlistenFn> =>
   listen<Palette>("theme", (e) => cb(e.payload));

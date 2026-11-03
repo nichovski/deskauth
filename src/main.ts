@@ -2,6 +2,7 @@ import { activity, getTheme, onLocked, onTheme, vaultStatus, type Palette } from
 import { renderAdd } from "./views/add";
 import { renderImport } from "./views/import";
 import { renderList } from "./views/list";
+import { renderSettings } from "./views/settings";
 import { renderSetup } from "./views/setup";
 import { renderUnlock } from "./views/unlock";
 
@@ -16,11 +17,11 @@ function applyTheme(p: Palette) {
   }
 }
 
-export type Screen = "list" | "import" | "add";
+export type Screen = "list" | "import" | "add" | "settings";
 export type Go = (to?: Screen) => void;
 
 let screen: Screen = "list";
-const screens = { list: renderList, import: renderImport, add: renderAdd };
+const screens = { list: renderList, import: renderImport, add: renderAdd, settings: renderSettings };
 
 function show(render: (root: HTMLElement, next: Go) => () => void, next: Go) {
   dispose();

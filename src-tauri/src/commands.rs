@@ -8,10 +8,11 @@ use crate::totp;
 use crate::vault::{self, Vault};
 use base64::Engine;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use zeroize::Zeroize;
 
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 
@@ -77,6 +78,7 @@ fn unix_now() -> u64 {
 }
 
 const LOCKED: &str = "Vault is locked";
+const NOT_FOUND: &str = "Account not found";
 
 #[tauri::command]
 pub fn vault_status(state: State<AppState>) -> Result<String, String> {
@@ -152,7 +154,7 @@ pub fn copy_code(id: String, app: AppHandle, state: State<AppState>) -> Result<(
             .accounts
             .iter()
             .find(|a| a.id == id)
-            .ok_or("Account not found")?;
+            .ok_or(NOT_FOUND)?;
         totp::code(account, unix_now())
     };
     state.touch();
@@ -337,6 +339,108 @@ pub fn account_add_manual(
     Ok(())
 }
 
+fn rename_account(accounts: &mut [Account], id: &str, issuer: &str, name: &str) -> Result<(), String> {
+    let (issuer, name) = (issuer.trim(), name.trim());
+    if issuer.is_empty() && name.is_empty() {
+        return Err("Issuer or name is required".into());
+    }
+    let account = accounts.iter_mut().find(|a| a.id == id).ok_or(NOT_FOUND)?;
+    account.issuer = issuer.into();
+    account.name = name.into();
+    Ok(())
+}
+
+/// Renames and saves. On a failed save the old names come back.
+fn rename_and_save(vault: &mut Vault, id: &str, issuer: &str, name: &str) -> Result<(), String> {
+    let old = vault
+        .accounts
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| (a.issuer.clone(), a.name.clone()));
+    rename_account(&mut vault.accounts, id, issuer, name)?;
+    vault.save().map_err(|e| {
+        if let Some((issuer, name)) = old
+            && let Some(a) = vault.accounts.iter_mut().find(|a| a.id == id)
+        {
+            a.issuer = issuer;
+            a.name = name;
+        }
+        e.to_string()
+    })
+}
+
+/// Removes and saves. On a failed save the account goes back to its place; on success its secret is wiped.
+fn delete_and_save(vault: &mut Vault, id: &str) -> Result<(), String> {
+    let index = vault.accounts.iter().position(|a| a.id == id).ok_or(NOT_FOUND)?;
+    let mut removed = vault.accounts.remove(index);
+    match vault.save() {
+        Ok(()) => {
+            removed.secret.zeroize();
+            Ok(())
+        }
+        Err(e) => {
+            vault.accounts.insert(index, removed);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Deletes the vault file. Only allowed while the vault is locked.
+fn reset_file(unlocked: bool, path: &Path) -> Result<(), String> {
+    if unlocked {
+        return Err("Lock the vault first".into());
+    }
+    vault::delete(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn account_rename(id: String, issuer: String, name: String, state: State<AppState>) -> Result<(), String> {
+    {
+        let mut guard = state.vault.lock().unwrap();
+        let v = guard.as_mut().ok_or(LOCKED)?;
+        rename_and_save(v, &id, &issuer, &name)?;
+    }
+    state.touch();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn account_delete(id: String, state: State<AppState>) -> Result<(), String> {
+    {
+        let mut guard = state.vault.lock().unwrap();
+        let v = guard.as_mut().ok_or(LOCKED)?;
+        delete_and_save(v, &id)?;
+    }
+    state.touch();
+    Ok(())
+}
+
+// Async so both Argon2 runs (verify, then derive) stay off the main thread.
+#[tauri::command]
+pub async fn vault_change_password(
+    current: String,
+    new_password: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ensure_unlocked(&state)?;
+    // Verify against the file without holding the vault lock; the copy is dropped (and wiped) right away.
+    drop(vault::unlock(&state.vault_path, &current).map_err(|e| e.to_string())?);
+    {
+        let mut guard = state.vault.lock().unwrap();
+        let v = guard.as_mut().ok_or(LOCKED)?;
+        v.change_password(&new_password).map_err(|e| e.to_string())?;
+    }
+    state.touch();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn vault_reset(state: State<AppState>) -> Result<(), String> {
+    // The guard is held so the vault cannot be unlocked between the check and the delete.
+    let guard = state.vault.lock().unwrap();
+    reset_file(guard.is_some(), &state.vault_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +592,64 @@ mod tests {
         assert_eq!(views[0].code, "94287082");
         assert_eq!(views[0].remaining, 1);
         assert_eq!(views[0].period, 30);
+    }
+
+    #[test]
+    fn rename_trims_and_validates() {
+        let mut accounts = vec![acc("1", "Old", "old")];
+        rename_account(&mut accounts, "1", "  New ", " me ").unwrap();
+        assert_eq!((accounts[0].issuer.as_str(), accounts[0].name.as_str()), ("New", "me"));
+        assert_eq!(rename_account(&mut accounts, "1", " ", ""), Err("Issuer or name is required".into()));
+        assert_eq!(rename_account(&mut accounts, "9", "a", "b"), Err("Account not found".into()));
+        rename_account(&mut accounts, "1", "", "only name").unwrap();
+        assert_eq!(accounts[0].issuer, "");
+    }
+
+    #[test]
+    fn rename_and_delete_persist() {
+        let (dir, mut v) = temp_vault();
+        v.accounts.push(acc("1", "A", "a"));
+        v.accounts.push(acc("2", "B", "b"));
+        rename_and_save(&mut v, "1", "Renamed", "x").unwrap();
+        assert_eq!(delete_and_save(&mut v, "9"), Err("Account not found".into()));
+        delete_and_save(&mut v, "2").unwrap();
+        let reopened = vault::unlock(&dir.path().join("vault.json"), "pw").unwrap();
+        assert_eq!(reopened.accounts.len(), 1);
+        assert_eq!((reopened.accounts[0].issuer.as_str(), reopened.accounts[0].name.as_str()), ("Renamed", "x"));
+    }
+
+    #[test]
+    fn failed_save_reverts_rename_and_delete() {
+        let (dir, mut v) = temp_vault();
+        v.accounts.push(acc("1", "A", "a"));
+        v.accounts.push(acc("2", "B", "b"));
+        // A directory in the temp-file slot makes every save fail.
+        std::fs::create_dir(dir.path().join("vault.json.tmp")).unwrap();
+        assert!(rename_and_save(&mut v, "1", "Changed", "c").is_err());
+        assert_eq!((v.accounts[0].issuer.as_str(), v.accounts[0].name.as_str()), ("A", "a"));
+        assert!(delete_and_save(&mut v, "1").is_err());
+        let ids: Vec<&str> = v.accounts.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["1", "2"]);
+        assert_eq!(v.accounts[0].secret, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    }
+
+    #[test]
+    fn damaged_vault_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, "hello").unwrap();
+        let err = vault::unlock(&path, "pw").err().unwrap().to_string();
+        assert!(err.starts_with("Vault file is damaged"), "{err}");
+    }
+
+    #[test]
+    fn reset_only_when_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, "hello").unwrap();
+        assert_eq!(reset_file(true, &path), Err("Lock the vault first".into()));
+        assert!(path.exists());
+        reset_file(false, &path).unwrap();
+        assert!(!vault::exists(&path));
     }
 }

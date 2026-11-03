@@ -74,6 +74,10 @@ pub fn run() {
             commands::import_finish,
             commands::import_cancel,
             commands::account_add_manual,
+            commands::account_rename,
+            commands::account_delete,
+            commands::vault_change_password,
+            commands::vault_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
