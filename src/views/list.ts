@@ -1,4 +1,5 @@
 import { codes, copyCode, vaultLock, type CodeView } from "../api";
+import type { Go } from "../main";
 
 const RING_R = 9;
 const RING_C = 2 * Math.PI * RING_R;
@@ -58,13 +59,17 @@ function createRow(onClick: () => void): Row {
   return { li, update };
 }
 
-export function renderList(root: HTMLElement, locked: () => void): () => void {
+export function renderList(root: HTMLElement, go: Go): () => void {
   root.innerHTML = `
     <header class="bar">
       <input id="search" type="search" placeholder="Search" autocomplete="off" spellcheck="false" />
       <button id="lock" class="ghost" title="Lock">Lock</button>
     </header>
     <ul id="rows" class="rows"></ul>
+    <footer class="actions">
+      <button id="import" class="ghost">Import / Re-import</button>
+      <button id="add" class="ghost">Add account</button>
+    </footer>
     <div id="toast" class="toast" hidden>Copied</div>`;
   const search = root.querySelector<HTMLInputElement>("#search")!;
   const rows = root.querySelector<HTMLUListElement>("#rows")!;
@@ -122,7 +127,7 @@ export function renderList(root: HTMLElement, locked: () => void): () => void {
       all = await codes();
       draw();
     } catch {
-      locked();
+      go();
     }
   };
 
@@ -138,8 +143,10 @@ export function renderList(root: HTMLElement, locked: () => void): () => void {
   });
   root.querySelector("#lock")!.addEventListener("click", async () => {
     await vaultLock();
-    locked();
+    go();
   });
+  root.querySelector("#import")!.addEventListener("click", () => go("import"));
+  root.querySelector("#add")!.addEventListener("click", () => go("add"));
 
   poll();
   const timer = window.setInterval(poll, 1000);

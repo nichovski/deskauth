@@ -1,4 +1,6 @@
 import { activity, getTheme, onLocked, onTheme, vaultStatus, type Palette } from "./api";
+import { renderAdd } from "./views/add";
+import { renderImport } from "./views/import";
 import { renderList } from "./views/list";
 import { renderSetup } from "./views/setup";
 import { renderUnlock } from "./views/unlock";
@@ -14,16 +16,25 @@ function applyTheme(p: Palette) {
   }
 }
 
-function show(render: (root: HTMLElement, next: () => void) => () => void, next: () => void) {
+export type Screen = "list" | "import" | "add";
+export type Go = (to?: Screen) => void;
+
+let screen: Screen = "list";
+const screens = { list: renderList, import: renderImport, add: renderAdd };
+
+function show(render: (root: HTMLElement, next: Go) => () => void, next: Go) {
   dispose();
   dispose = render(root, next);
 }
 
-async function route() {
+/** Re-checks the vault and shows `to` (default: the current screen) when it is unlocked. */
+async function route(to?: Screen) {
+  if (to) screen = to;
   const status = await vaultStatus();
+  if (status !== "unlocked") screen = "list";
   if (status === "none") show(renderSetup, route);
   else if (status === "locked") show(renderUnlock, route);
-  else show(renderList, route);
+  else show(screens[screen], route);
 }
 
 let lastActivity = 0;
@@ -38,5 +49,5 @@ window.addEventListener("pointermove", reportActivity);
 
 getTheme().then(applyTheme);
 onTheme(applyTheme);
-onLocked(route);
+onLocked(() => route());
 route();

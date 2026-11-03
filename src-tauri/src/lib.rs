@@ -49,10 +49,9 @@ pub fn run() {
                     std::thread::sleep(AUTO_LOCK_CHECK_EVERY);
                     let state = handle.state::<AppState>();
                     let idle = state.last_activity.lock().unwrap().elapsed();
-                    let mut vault = state.vault.lock().unwrap();
-                    if vault.is_some() && idle > AUTO_LOCK_AFTER {
-                        *vault = None;
-                        drop(vault);
+                    let unlocked = state.vault.lock().unwrap().is_some();
+                    if unlocked && idle > AUTO_LOCK_AFTER {
+                        commands::lock(&state);
                         let _ = handle.emit("locked", ());
                     }
                 }
@@ -68,6 +67,13 @@ pub fn run() {
             commands::codes,
             commands::copy_code,
             commands::get_theme,
+            commands::import_image,
+            commands::camera_list,
+            commands::camera_start,
+            commands::camera_stop,
+            commands::import_finish,
+            commands::import_cancel,
+            commands::account_add_manual,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
