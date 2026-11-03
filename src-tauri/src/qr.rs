@@ -1,12 +1,21 @@
+use std::collections::HashSet;
+
 use image::GrayImage;
+use rxing::{BarcodeFormat, DecodeHints};
 
 pub fn decode_luma(img: &GrayImage) -> Vec<String> {
-    let mut prepared = rqrr::PreparedImage::prepare(img.clone());
-    prepared
-        .detect_grids()
-        .into_iter()
-        .filter_map(|grid| grid.decode().ok().map(|(_, content)| content))
-        .collect()
+    let mut hints = DecodeHints {
+        PossibleFormats: Some(HashSet::from([BarcodeFormat::QR_CODE])),
+        ..DecodeHints::default()
+    };
+    rxing::helpers::detect_multiple_in_luma_with_hints(
+        img.as_raw().clone(),
+        img.width(),
+        img.height(),
+        &mut hints,
+    )
+    .map(|found| found.into_iter().map(|r| r.getText().to_string()).collect())
+    .unwrap_or_default()
 }
 
 pub fn decode_image_bytes(bytes: &[u8]) -> Result<Vec<String>, String> {
@@ -53,6 +62,22 @@ mod tests {
         let mut big = GrayImage::from_pixel(1600, 1200, Luma([255u8]));
         image::imageops::overlay(&mut big, &qr, 700, 500);
         assert_eq!(decode_image_bytes(&png(&big)).unwrap(), vec![URI.to_string()]);
+    }
+
+    /// Google's export QR codes are dense (up to version 28). Every common
+    /// screen width must decode, not just some of them.
+    #[test]
+    fn decodes_dense_qr_at_any_size() {
+        let uri = format!("otpauth-migration://offline?data={}", "Q".repeat(1100));
+        let qr = qr_image(&uri);
+        let mut screen = GrayImage::from_pixel(qr.width() + 200, qr.height() * 2, Luma([255u8]));
+        image::imageops::overlay(&mut screen, &qr, 100, i64::from(qr.height() / 2));
+        for width in [480u32, 540, 640, 720, 800, 900, 1080, 1440] {
+            let height = screen.height() * width / screen.width();
+            let scaled =
+                image::imageops::resize(&screen, width, height, image::imageops::FilterType::Triangle);
+            assert_eq!(decode_luma(&scaled), vec![uri.clone()], "width {width}");
+        }
     }
 
     #[test]
