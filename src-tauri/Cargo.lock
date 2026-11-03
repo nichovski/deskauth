@@ -1136,6 +1136,7 @@ dependencies = [
  "image",
  "nokhwa",
  "notify",
+ "percent-encoding",
  "prost",
  "qrcode",
  "rand 0.8.8",
