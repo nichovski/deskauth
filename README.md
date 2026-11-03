@@ -9,7 +9,7 @@ Not affiliated with Google.
 Read this before you use it.
 
 - The codes live on the same computer as your passwords. If someone gets into this computer, they get both factors.
-- Your master password is the only protection. The vault is an encrypted file (Argon2 key derivation, ChaCha20-Poly1305).
+- Your master password is the only protection. The vault is an encrypted file (Argon2id key derivation, XChaCha20-Poly1305).
 - There is no recovery. If you forget the master password, the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
 - The app locks itself after 5 minutes of no use. A copied code is cleared from the clipboard after 30 seconds.
 
@@ -49,6 +49,8 @@ cd packaging/arch && makepkg -si
 ```
 
 This builds from the local checkout and installs `deskauth` to `/usr/bin`.
+
+If your Rust or Node come from rustup or mise (not pacman), run `makepkg -fid` instead. The `-d` flag skips the dependency check, which would otherwise fail on the missing `rust` and `npm` packages.
 
 ## Releases
 
