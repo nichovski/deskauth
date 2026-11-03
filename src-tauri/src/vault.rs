@@ -13,7 +13,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::account::Account;
 
@@ -75,14 +75,6 @@ pub struct Vault {
     path: PathBuf,
     key: Zeroizing<[u8; KEY_LEN]>,
     salt: [u8; SALT_LEN],
-}
-
-impl Drop for Vault {
-    fn drop(&mut self) {
-        for a in &mut self.accounts {
-            a.secret.zeroize();
-        }
-    }
 }
 
 fn io_err(e: std::io::Error) -> VaultError {

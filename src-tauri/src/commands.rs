@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
-use zeroize::Zeroize;
 
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 
@@ -391,15 +390,12 @@ fn rename_and_save(vault: &mut Vault, id: &str, issuer: &str, name: &str) -> Res
     })
 }
 
-/// Removes and saves. On a failed save the account goes back to its place; on success its secret is wiped.
+/// Removes and saves. On a failed save the account goes back to its place; on success it is dropped (and wiped).
 fn delete_and_save(vault: &mut Vault, id: &str) -> Result<(), String> {
     let index = vault.accounts.iter().position(|a| a.id == id).ok_or(NOT_FOUND)?;
-    let mut removed = vault.accounts.remove(index);
+    let removed = vault.accounts.remove(index);
     match vault.save() {
-        Ok(()) => {
-            removed.secret.zeroize();
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(e) => {
             vault.accounts.insert(index, removed);
             Err(e.to_string())

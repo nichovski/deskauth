@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 const B32: base32::Alphabet = base32::Alphabet::Rfc4648 { padding: false };
 
@@ -21,6 +22,12 @@ pub struct Account {
     pub algorithm: Algorithm,
     pub digits: u32,
     pub period: u64,
+}
+
+impl Drop for Account {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 impl fmt::Debug for Account {
@@ -111,8 +118,8 @@ impl Account {
         }
     }
 
-    pub fn secret_bytes(&self) -> Vec<u8> {
-        base32::decode(B32, &self.secret).unwrap_or_default()
+    pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(base32::decode(B32, &self.secret).unwrap_or_default())
     }
 }
 
@@ -165,7 +172,15 @@ mod tests {
     fn new_succeeds_and_round_trips() {
         let a = Account::new("a", "b", "jbsw y3dp ehpk 3pxp", Algorithm::Sha1, 6, 30).unwrap();
         assert!(!a.id.is_empty());
-        assert_eq!(a.secret_bytes(), b"Hello!\xDE\xAD\xBE\xEF");
+        assert_eq!(*a.secret_bytes(), b"Hello!\xDE\xAD\xBE\xEF");
+    }
+
+    #[test]
+    fn clone_survives_drop_of_original() {
+        let a = Account::new("a", "b", "JBSWY3DPEHPK3PXP", Algorithm::Sha1, 6, 30).unwrap();
+        let b = a.clone();
+        drop(a);
+        assert_eq!(b.secret, "JBSWY3DPEHPK3PXP");
     }
 
     #[test]

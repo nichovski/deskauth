@@ -1,6 +1,6 @@
 use crate::account::Account;
 use serde::Serialize;
-use std::collections::HashSet;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct MergeResult {
@@ -11,11 +11,14 @@ pub struct MergeResult {
 
 /// A duplicate is an account with the same secret bytes, in `existing` or earlier in `incoming`.
 pub fn merge(existing: &mut Vec<Account>, incoming: Vec<Account>) -> MergeResult {
-    let mut seen: HashSet<Vec<u8>> = existing.iter().map(Account::secret_bytes).collect();
+    // Zeroizing is not Hashable; a vault holds few accounts, so a linear scan is fine.
+    let mut seen: Vec<Zeroizing<Vec<u8>>> = existing.iter().map(Account::secret_bytes).collect();
     let mut added = 0;
     let mut skipped_duplicates = 0;
     for account in incoming {
-        if seen.insert(account.secret_bytes()) {
+        let bytes = account.secret_bytes();
+        if !seen.iter().any(|s| s[..] == bytes[..]) {
+            seen.push(bytes);
             existing.push(account);
             added += 1;
         } else {

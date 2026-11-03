@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(parsed.accounts[1].algorithm, Algorithm::Sha256);
         assert_eq!(parsed.accounts[1].digits, 8);
         assert_eq!(parsed.accounts[1].period, 30);
-        assert_eq!(parsed.accounts[0].secret_bytes(), b"secret-one");
+        assert_eq!(*parsed.accounts[0].secret_bytes(), b"secret-one");
         assert_eq!(parsed.batch, None);
     }
 
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(parsed.accounts.len(), 1);
         assert_eq!(parsed.accounts[0].issuer, "b");
         assert_eq!(parsed.accounts[0].name, "a");
-        assert_eq!(parsed.accounts[0].secret_bytes(), b"Hello");
+        assert_eq!(*parsed.accounts[0].secret_bytes(), b"Hello");
     }
 
     #[test]
@@ -237,7 +237,7 @@ mod tests {
         let escaped = parse_uri(&url_with(&pct(&b64))).unwrap();
         assert_eq!(raw.accounts.len(), 1);
         assert_eq!(raw.accounts[0].secret, escaped.accounts[0].secret);
-        assert_eq!(raw.accounts[0].secret_bytes(), secret);
+        assert_eq!(*raw.accounts[0].secret_bytes(), secret);
     }
 
     #[test]
