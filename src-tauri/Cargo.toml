@@ -32,7 +32,7 @@ prost = "0.13"
 url = "2"
 percent-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
-rqrr = "0.8"
+rxing = { version = "0.7", default-features = false }
 image = "0.25"
 nokhwa = { version = "0.10", features = ["input-native"] }
 notify = "6"
