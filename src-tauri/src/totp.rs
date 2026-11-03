@@ -33,8 +33,6 @@ pub fn remaining_seconds(period: u64, unix_time: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::{Account, Algorithm};
-
     fn acc(secret: &[u8], alg: Algorithm, digits: u32) -> Account {
         Account::from_secret_bytes("i", "n", secret, alg, digits, 30)
     }

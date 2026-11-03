@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 const B32: base32::Alphabet = base32::Alphabet::Rfc4648 { padding: false };
 
@@ -10,7 +11,7 @@ pub enum Algorithm {
     Sha512,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     pub id: String,
     pub issuer: String,
@@ -22,19 +23,38 @@ pub struct Account {
     pub period: u64,
 }
 
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Account")
+            .field("id", &self.id)
+            .field("issuer", &self.issuer)
+            .field("name", &self.name)
+            .field("secret", &"<redacted>")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .finish()
+    }
+}
+
+fn decodes_to_bytes(secret: &str) -> bool {
+    matches!(base32::decode(B32, secret), Some(b) if !b.is_empty())
+}
+
 pub fn normalize_secret(input: &str) -> Result<String, String> {
-    let cleaned: String = input
+    let squeezed: String = input
         .chars()
-        .filter(|c| !c.is_whitespace() && *c != '=')
+        .filter(|c| !c.is_whitespace())
         .collect::<String>()
-        .to_uppercase();
+        .to_ascii_uppercase();
+    let cleaned = squeezed.trim_end_matches('=').to_string();
     if cleaned.is_empty() {
         return Err("secret is empty".into());
     }
-    match base32::decode(B32, &cleaned) {
-        Some(bytes) if !bytes.is_empty() => Ok(cleaned),
-        _ => Err("secret is not valid base32".into()),
+    if !decodes_to_bytes(&cleaned) {
+        return Err("secret is not valid base32".into());
     }
+    Ok(cleaned)
 }
 
 impl Account {
@@ -46,13 +66,7 @@ impl Account {
         digits: u32,
         period: u64,
     ) -> Result<Account, String> {
-        if digits != 6 && digits != 8 {
-            return Err("digits must be 6 or 8".into());
-        }
-        if period == 0 {
-            return Err("period must be greater than 0".into());
-        }
-        Ok(Account {
+        let account = Account {
             id: uuid::Uuid::new_v4().to_string(),
             issuer: issuer.to_string(),
             name: name.to_string(),
@@ -60,7 +74,22 @@ impl Account {
             algorithm,
             digits,
             period,
-        })
+        };
+        account.validate()?;
+        Ok(account)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.digits != 6 && self.digits != 8 {
+            return Err("digits must be 6 or 8".into());
+        }
+        if self.period == 0 {
+            return Err("period must be greater than 0".into());
+        }
+        if !decodes_to_bytes(&self.secret) {
+            return Err("secret is not valid base32".into());
+        }
+        Ok(())
     }
 
     pub fn from_secret_bytes(
@@ -105,5 +134,42 @@ mod tests {
     #[test]
     fn rejects_bad_digits() {
         assert!(Account::new("a", "b", "JBSWY3DPEHPK3PXP", Algorithm::Sha1, 7, 30).is_err());
+    }
+
+    #[test]
+    fn rejects_misplaced_padding() {
+        assert!(normalize_secret("AB=CD").is_err());
+    }
+
+    #[test]
+    fn debug_redacts_secret() {
+        let a = Account::new("a", "b", "JBSWY3DPEHPK3PXP", Algorithm::Sha1, 6, 30).unwrap();
+        assert!(!format!("{:?}", a).contains("JBSWY3DPEHPK3PXP"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid() {
+        let mut a = Account::new("a", "b", "JBSWY3DPEHPK3PXP", Algorithm::Sha1, 6, 30).unwrap();
+        assert!(a.validate().is_ok());
+        a.digits = 10;
+        assert!(a.validate().is_err());
+        a.digits = 6;
+        a.period = 0;
+        assert!(a.validate().is_err());
+        a.period = 30;
+        a.secret = "not base32!".into();
+        assert!(a.validate().is_err());
+    }
+
+    #[test]
+    fn new_succeeds_and_round_trips() {
+        let a = Account::new("a", "b", "jbsw y3dp ehpk 3pxp", Algorithm::Sha1, 6, 30).unwrap();
+        assert!(!a.id.is_empty());
+        assert_eq!(a.secret_bytes(), b"Hello!\xDE\xAD\xBE\xEF");
+    }
+
+    #[test]
+    fn algorithm_serializes_uppercase() {
+        assert_eq!(serde_json::to_string(&Algorithm::Sha1).unwrap(), "\"SHA1\"");
     }
 }
