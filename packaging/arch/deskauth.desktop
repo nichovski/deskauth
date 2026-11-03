@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Deskauth
+Comment=Desktop TOTP authenticator
+Exec=deskauth
+Icon=deskauth
+Categories=Utility;Security;
+Terminal=false
