@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- App icon (countdown ring and keyhole) replacing the Tauri template icons, a scalable icon in the Arch package, and README screenshots in eight Omarchy themes with a platform table.
 - Deskauth: a desktop TOTP authenticator for Linux, Windows and macOS, so codes no longer need the phone.
 - Import from Google Authenticator's export QR, by camera or image file, including exports split over several QR codes. Re-import merges and skips accounts you already have.
 - Add a single account by `otpauth://` QR or by typing the secret.
