@@ -22,5 +22,6 @@ package() {
   install -Dm755 "$srcdir/target/release/deskauth" "$pkgdir/usr/bin/deskauth"
   install -Dm644 "$startdir/deskauth.desktop" "$pkgdir/usr/share/applications/deskauth.desktop"
   install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/deskauth.png"
+  install -Dm644 src-tauri/icons/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/deskauth.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

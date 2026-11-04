@@ -1,8 +1,33 @@
+<p align="center"><img src="src-tauri/icons/icon.svg" width="112" alt="Deskauth icon"></p>
+
 # Deskauth
 
-A desktop TOTP authenticator. It imports your accounts from Google Authenticator and shows the 6 or 8 digit codes on your computer. Built with Tauri 2 (Rust backend, TypeScript UI). MIT license.
+A desktop TOTP authenticator. It imports your accounts from Google Authenticator and shows the 6 or 8 digit codes on your computer, so you don't need your phone for 2FA. Built with Tauri 2 (Rust backend, TypeScript UI). MIT license.
+
+**Runs on Linux, Windows and macOS.** On Omarchy it follows your theme and changes live when you switch themes.
 
 Not affiliated with Google.
+
+<p align="center"><img src="docs/screenshots/list-tokyo-night.png" width="320" alt="Deskauth code list"> <img src="docs/screenshots/unlock-tokyo-night.png" width="320" alt="Deskauth unlock screen"></p>
+
+## Omarchy themes
+
+The colors come from the current Omarchy theme (`~/.local/state/omarchy/current/theme/colors.toml`). On other systems it uses Tokyo Night.
+
+![Deskauth in eight Omarchy themes](docs/screenshots/themes.png)
+
+Screenshots use demo accounts.
+
+## Platforms
+
+| System | How to get it |
+|---|---|
+| Linux (Arch / Omarchy) | `makepkg` from `packaging/arch`, see [Install on Arch](#install-on-arch) |
+| Linux (other) | AppImage, .deb or .rpm from a release, or [build from source](#build-from-source) |
+| Windows | .msi or .exe installer from a release, or build from source |
+| macOS | .dmg from a release, or build from source |
+
+Release builds are unsigned, see [Releases](#releases).
 
 ## Security trade-off
 
@@ -41,6 +66,8 @@ npm run tauri build
 ```
 
 Packages are written to `src-tauri/target/release/bundle/`.
+
+On Windows you need the Visual Studio C++ build tools and WebView2 (built into Windows 10 and 11). On macOS you need the Xcode command line tools. See https://v2.tauri.app/start/prerequisites/
 
 ## Install on Arch
 
