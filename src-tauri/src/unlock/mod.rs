@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod fido_hid;
+#[cfg(target_os = "linux")]
+mod finger_linux;
 
 #[derive(Debug, PartialEq)]
 pub enum DeviceError {
@@ -73,12 +75,15 @@ pub trait Fingerprint: Send + Sync {
 }
 
 /// Used on platforms without a device implementation.
+#[cfg(any(test, not(target_os = "linux")))]
 struct Stub;
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn unsupported() -> DeviceError {
     DeviceError::Unsupported("Not supported on this system.".into())
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 impl HmacKey for Stub {
     fn available(&self) -> bool {
         false
@@ -94,6 +99,7 @@ impl HmacKey for Stub {
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 impl Fingerprint for Stub {
     fn available(&self) -> bool {
         false
@@ -122,6 +128,12 @@ pub fn platform_hmac_key() -> Box<dyn HmacKey> {
     Box::new(Stub)
 }
 
+#[cfg(target_os = "linux")]
+pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
+    Box::new(finger_linux::FprintdFinger)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
     Box::new(Stub)
 }
@@ -295,11 +307,13 @@ mod tests {
 
     #[test]
     fn stubs_are_unavailable_and_unsupported() {
-        // The stub directly: on Linux and macOS `platform_hmac_key()` is the real HID device.
+        // The stub directly: the platform functions may return real devices.
         assert!(!HmacKey::available(&Stub));
         assert!(matches!(Stub.enroll(), Err(DeviceError::Unsupported(_))));
-        let f = platform_fingerprint();
-        assert!(!f.available());
-        assert!(matches!(f.unlock("s1"), Err(DeviceError::Unsupported(_))));
+        assert!(!Fingerprint::available(&Stub));
+        assert!(matches!(
+            Stub.unlock("s1"),
+            Err(DeviceError::Unsupported(_))
+        ));
     }
 }

@@ -43,6 +43,12 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 ctap-hid-fido2 = "3.6"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+keyring = { version = "3", features = ["async-secret-service", "async-io", "crypto-rust"] }
+async-io = "2"
+futures-lite = "2"
+
 [dev-dependencies]
 qrcode = "0.14"
 tempfile = "3"
