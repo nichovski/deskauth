@@ -258,7 +258,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
       mErr.textContent = String(e);
     }
     await refresh();
-    if (focused instanceof HTMLElement && focused.isConnected && !focused.matches(":disabled")) focused.focus();
+    if (focused instanceof HTMLElement && focused.offsetParent !== null && !focused.matches(":disabled")) focused.focus();
     else radios.find((r) => r.checked)?.focus();
   }
 
