@@ -641,6 +641,9 @@ fn unlock_v2(path: &Path, bytes: &[u8], secret: Secret) -> Result<Vault, VaultEr
             unwrap(&kek, KIND_PASSWORD_YUBIKEY, id, slot_nonce, wrapped)?
         }
         Secret::Fingerprint { secret } => {
+            if file.mode != Mode::Any {
+                return Err(not_enabled("Fingerprint unlock"));
+            }
             let (id, slot_nonce, wrapped) = file
                 .slots
                 .iter()
@@ -783,6 +786,23 @@ impl Vault {
         Ok(())
     }
 
+    /// Like `commit`, but also switches to `vault_key`, which `slots` must wrap. Used when every
+    /// slot is replaced, so a copy of an old file (or an old slot secret) cannot open the new
+    /// one. On failure the old key comes back with the old mode and slots.
+    fn commit_new_key(
+        &mut self,
+        mode: Mode,
+        slots: Vec<Slot>,
+        vault_key: Zeroizing<[u8; KEY_LEN]>,
+    ) -> Result<(), VaultError> {
+        let old_key = std::mem::replace(&mut self.vault_key, vault_key);
+        if let Err(e) = self.commit(mode, slots) {
+            self.vault_key = old_key;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn require_mode(&self, mode: Mode, what: &str) -> Result<(), VaultError> {
         if self.mode != mode {
             return Err(not_enabled(what));
@@ -858,6 +878,13 @@ impl Vault {
         secret: &[u8; 32],
     ) -> Result<(), VaultError> {
         self.require_mode(Mode::Any, "Fingerprint unlock")?;
+        if self
+            .slots
+            .iter()
+            .any(|s| s.id() == slot_id && !matches!(s, Slot::Fingerprint { .. }))
+        {
+            return Err(VaultError::NotAllowed("This slot id is already in use".into()));
+        }
         let (nonce, wrapped) = wrap(secret, KIND_FINGERPRINT, slot_id, &self.vault_key)?;
         let mut slots: Vec<Slot> = self
             .slots
@@ -916,13 +943,14 @@ impl Vault {
     }
 
     /// From `password`: only flips the mode, `kek` must be None. From `password_yubikey`: `kek`
-    /// is required and one password slot replaces all slots.
+    /// is required and one password slot, under a new vault key, replaces all slots.
     pub fn to_any_mode(&mut self, kek: Option<PasswordKek>) -> Result<(), VaultError> {
         match (self.mode, kek) {
             (Mode::Password, None) => self.commit(Mode::Any, self.slots.clone()),
             (Mode::PasswordYubikey, Some(kek)) => {
-                let slot = password_slot(new_slot_id(), &kek, &self.vault_key)?;
-                self.commit(Mode::Any, vec![slot])
+                let vault_key = Zeroizing::new(random_bytes::<KEY_LEN>());
+                let slot = password_slot(new_slot_id(), &kek, &vault_key)?;
+                self.commit_new_key(Mode::Any, vec![slot], vault_key)
             }
             (Mode::PasswordYubikey, None) => Err(VaultError::NotAllowed(
                 "A new password is needed to leave password and YubiKey mode".into(),
@@ -934,8 +962,8 @@ impl Vault {
         }
     }
 
-    /// From `password` or `any`: one `password_yubikey` slot replaces all slots. Returns the
-    /// removed fingerprint slot ids so the caller can delete their OS items.
+    /// From `password` or `any`: one `password_yubikey` slot, under a new vault key, replaces all
+    /// slots. Returns the removed fingerprint slot ids so the caller can delete their OS items.
     pub fn to_two_factor_mode(
         &mut self,
         name: &str,
@@ -947,15 +975,16 @@ impl Vault {
             return Err(VaultError::NotAllowed("The vault already uses this mode".into()));
         }
         let removed = fingerprint_ids(&self.slots);
+        let vault_key = Zeroizing::new(random_bytes::<KEY_LEN>());
         let slot = two_factor_slot(
             new_slot_id(),
             name.into(),
             B64.encode(credential_id),
             B64.encode(salt),
             &kek,
-            &self.vault_key,
+            &vault_key,
         )?;
-        self.commit(Mode::PasswordYubikey, vec![slot])?;
+        self.commit_new_key(Mode::PasswordYubikey, vec![slot], vault_key)?;
         Ok(removed)
     }
 
@@ -995,13 +1024,16 @@ impl Vault {
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
+    // A unique name in the same directory, so the rename stays on one filesystem and a stale or
+    // planted temp file is never reused.
+    let suffix: String = random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect();
     let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".{suffix}.tmp"));
     let tmp = PathBuf::from(tmp_name);
 
     let result = (|| -> std::io::Result<()> {
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -1017,6 +1049,17 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
         return Err(io_err(e));
+    }
+    // Makes the rename itself durable.
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io_err)?;
     }
     Ok(())
 }
@@ -1279,9 +1322,14 @@ mod tests {
     #[test]
     fn no_tmp_left_behind() {
         let (_d, p) = setup();
-        create(&p, "pw").unwrap();
-        assert!(!p.with_extension("json.tmp").exists());
-        assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
+        let mut v = create(&p, "pw").unwrap();
+        v.to_any_mode(None).unwrap();
+        v.save().unwrap();
+        let names: Vec<_> = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec!["vault.json"]);
     }
 
     #[cfg(unix)]
@@ -1671,5 +1719,114 @@ mod tests {
         j["slots"].as_array_mut().unwrap().push(extra);
         write_json(&p, &j);
         assert!(matches!(unlock(&p, "pw"), Err(VaultError::Corrupt(_))));
+    }
+
+    /// Tries to open the accounts in the file at `p` with `key`.
+    fn opens_with(p: &Path, key: &[u8; KEY_LEN]) -> bool {
+        let file: VaultFileV2 = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+        let header = HeaderV2 {
+            version: file.version,
+            mode: file.mode,
+            slots: &file.slots,
+            nonce: &file.nonce,
+        };
+        let nonce = decode_fixed::<NONCE_LEN>(&file.nonce, "nonce").unwrap();
+        let ciphertext = decode(&file.ciphertext, "ciphertext").unwrap();
+        decrypt_accounts(key, &nonce, &ciphertext, &to_json(&header).unwrap()).is_ok()
+    }
+
+    #[test]
+    fn to_two_factor_rotates_vault_key() {
+        let (d, p) = setup();
+        let mut v = any_vault(&p);
+        v.save().unwrap();
+        let old_copy = d.path().join("old.json");
+        std::fs::copy(&p, &old_copy).unwrap();
+        let kek = TwoFactorKek::derive("pw", &HMAC).unwrap();
+        v.to_two_factor_mode("Blue", CRED, SALT, kek).unwrap();
+        let old_key = unlock(&old_copy, "pw").unwrap().vault_key;
+        assert!(!opens_with(&p, &old_key));
+        assert!(opens_with(&p, &v.vault_key));
+        let u = unlock_with(&p, two_factor("pw", CRED, &HMAC)).unwrap();
+        assert_eq!(u.accounts, v.accounts);
+    }
+
+    #[test]
+    fn to_any_from_two_factor_rotates_vault_key() {
+        let (_d, p) = setup();
+        let mut v = two_factor_vault(&p);
+        let old_key = v.vault_key.clone();
+        v.to_any_mode(Some(PasswordKek::derive("new").unwrap())).unwrap();
+        assert!(!opens_with(&p, &old_key));
+        assert_eq!(unlock(&p, "new").unwrap().accounts, v.accounts);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_to_two_factor_keeps_old_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, p) = setup();
+        let mut v = any_vault(&p);
+        v.add_yubikey("Blue", CRED, SALT, &HMAC).unwrap();
+        let before = v.info();
+        let old_key = v.vault_key.clone();
+        let kek = TwoFactorKek::derive("pw", &HMAC2).unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = v.to_two_factor_mode("Red", CRED2, SALT, kek);
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(VaultError::Io(_))));
+        assert_eq!(v.mode(), Mode::Any);
+        assert_eq!(v.info(), before);
+        assert_eq!(*v.vault_key, *old_key);
+        v.save().unwrap();
+        assert!(opens_with(&p, &old_key));
+        assert!(unlock(&p, "pw").is_ok());
+        assert!(unlock_with(&p, yubikey(CRED, &HMAC)).is_ok());
+    }
+
+    #[test]
+    fn fingerprint_id_clash_is_not_allowed() {
+        let (_d, p) = setup();
+        let mut v = any_vault(&p);
+        let yk = v.add_yubikey("Blue", CRED, SALT, &HMAC).unwrap();
+        assert!(matches!(
+            v.set_fingerprint(&yk, "linux", &FP),
+            Err(VaultError::NotAllowed(_))
+        ));
+        assert_eq!(v.info().fingerprint, None);
+    }
+
+    #[test]
+    fn extra_slot_in_two_factor_file_is_corrupt() {
+        let (_d, p) = setup();
+        two_factor_vault(&p);
+        let base = read_json(&p);
+        let password = serde_json::json!({
+            "id": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "kind": "password",
+            "kdf": base["slots"][0]["kdf"].clone(),
+            "nonce": B64.encode([0u8; NONCE_LEN]),
+            "wrapped": B64.encode([0u8; 48]),
+        });
+        let yubikey_slot = serde_json::json!({
+            "id": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "kind": "yubikey",
+            "name": "Fake",
+            "credential_id": B64.encode(CRED2),
+            "salt": B64.encode(SALT),
+            "nonce": B64.encode([0u8; NONCE_LEN]),
+            "wrapped": B64.encode([0u8; 48]),
+        });
+        for extra in [password, yubikey_slot] {
+            let mut j = base.clone();
+            j["slots"].as_array_mut().unwrap().push(extra);
+            write_json(&p, &j);
+            assert!(matches!(unlock(&p, "pw"), Err(VaultError::Corrupt(_))));
+            assert!(matches!(
+                unlock_with(&p, yubikey(CRED2, &HMAC)),
+                Err(VaultError::Corrupt(_))
+            ));
+            assert!(matches!(read_info(&p), Err(VaultError::Corrupt(_))));
+        }
     }
 }

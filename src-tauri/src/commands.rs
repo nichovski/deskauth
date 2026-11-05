@@ -657,8 +657,10 @@ mod tests {
         let (dir, mut v) = temp_vault();
         v.accounts.push(acc("1", "A", "a"));
         v.accounts.push(acc("2", "B", "b"));
-        // A directory in the temp-file slot makes every save fail.
-        std::fs::create_dir(dir.path().join("vault.json.tmp")).unwrap();
+        // A directory where the vault file goes makes the rename, so every save, fail.
+        let path = dir.path().join("vault.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
         assert!(rename_and_save(&mut v, "1", "Changed", "c").is_err());
         assert_eq!((v.accounts[0].issuer.as_str(), v.accounts[0].name.as_str()), ("A", "a"));
         assert!(delete_and_save(&mut v, "1").is_err());
