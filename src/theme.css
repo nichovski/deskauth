@@ -539,3 +539,126 @@ h2 {
 .keys button {
   padding: 4px 10px;
 }
+
+/* Fingerprint icon: pulse and sweep while scanning, shake on no match. */
+.finger {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.finger[hidden] {
+  display: none;
+}
+
+.finger svg {
+  width: 56px;
+  height: 56px;
+  color: var(--fg-dim);
+  transition: color 0.2s;
+}
+
+.finger .ridges {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.finger .scan {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0;
+}
+
+.finger[data-state="scanning"] svg {
+  color: var(--fg);
+  animation: finger-pulse 1.6s ease-in-out infinite;
+}
+
+.finger[data-state="scanning"] .scan {
+  opacity: 0.8;
+  animation: finger-sweep 1.6s ease-in-out infinite alternate;
+}
+
+.finger[data-state="no_match"] svg {
+  color: var(--danger);
+  animation: finger-shake 0.6s ease-in-out;
+}
+
+.finger[data-state="match"] svg {
+  color: var(--ok);
+}
+
+.finger-line {
+  min-height: 1.4em;
+  font-size: 13px;
+  text-align: center;
+}
+
+.key-line.glow {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent);
+  animation: key-glow 1.6s ease-in-out infinite;
+}
+
+@keyframes finger-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes finger-sweep {
+  from {
+    transform: translateY(8px);
+  }
+  to {
+    transform: translateY(42px);
+  }
+}
+
+@keyframes finger-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-5px);
+  }
+  40%,
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+@keyframes key-glow {
+  50% {
+    opacity: 0.6;
+  }
+}
+
+/* Same specificity as the rules above, later in the file: colour changes only. */
+@media (prefers-reduced-motion: reduce) {
+  .finger[data-state] svg,
+  .finger[data-state] .scan,
+  .key-line.glow {
+    animation: none;
+  }
+
+  .finger[data-state] .scan {
+    opacity: 0;
+  }
+
+  .finger[data-state="scanning"] svg {
+    color: var(--accent);
+  }
+}

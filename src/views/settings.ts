@@ -1,6 +1,7 @@
 import {
   fingerprintDisable,
   fingerprintEnable,
+  onFingerStatus,
   onTouchNeeded,
   setMode,
   unlockMethods,
@@ -12,10 +13,12 @@ import {
 } from "../api";
 import type { Go } from "../main";
 import { confirmDialog } from "./confirm";
+import { fingerprintHtml, setFingerLine, setFingerState } from "./fingerprint";
 
 const MIN_LENGTH = 8;
 const DEFAULT_KEY_NAME = "YubiKey";
 const NO_YUBIKEY = "No YubiKey support on this system.";
+const PIN_PLACEHOLDER = "YubiKey PIN (if it has one)";
 
 const MODES: { mode: Mode; label: string; line: string }[] = [
   { mode: "password", label: "Password only", line: "Only your password opens the vault." },
@@ -62,6 +65,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
             <p class="dim" id="mode-hint"></p>
             <input id="mode-pw" type="password" placeholder="Current password" autocomplete="current-password" hidden />
             <input id="mode-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" hidden />
+            <input id="mode-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" hidden />
             <div class="actions" id="mode-actions" hidden><button type="submit">Apply</button></div>
           </form>
           <p class="warn" id="one-key" hidden>Only one YubiKey is registered. If you lose it, you lose this vault. Add a backup key.</p>
@@ -72,12 +76,14 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
             <form id="add-form" class="stack">
               <input id="add-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" />
               <input id="add-pw" type="password" placeholder="Current password" autocomplete="current-password" />
+              <input id="add-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" />
               <div class="actions"><button type="submit">Add YubiKey</button></div>
             </form>
           </div>
           <div id="finger-section" class="stack">
             <h2>Fingerprint</h2>
             <label class="switch" id="finger-label"><input type="checkbox" id="finger" /> Unlock with fingerprint</label>
+            ${fingerprintHtml("finger-scan")}
             <p class="dim" id="finger-note" hidden>Any program running as you can read the keyring item while you are logged in, so on Linux the fingerprint is convenience, not extra security.</p>
             <p class="dim" id="no-finger" hidden>No fingerprint reader found.</p>
           </div>
@@ -110,6 +116,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const modeHintEl = $("#mode-hint");
   const modePw = $<HTMLInputElement>("#mode-pw");
   const modeName = $<HTMLInputElement>("#mode-name");
+  const modePin = $<HTMLInputElement>("#mode-pin");
   const modeActions = $("#mode-actions");
   const oneKey = $("#one-key");
   const keysSection = $("#keys-section");
@@ -118,9 +125,11 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const addForm = $<HTMLFormElement>("#add-form");
   const addName = $<HTMLInputElement>("#add-name");
   const addPw = $<HTMLInputElement>("#add-pw");
+  const addPin = $<HTMLInputElement>("#add-pin");
   const fingerSection = $("#finger-section");
   const fingerLabel = $("#finger-label");
   const finger = $<HTMLInputElement>("#finger");
+  const fingerScan = $("#finger-scan");
   const fingerNote = $("#finger-note");
   const noFinger = $("#no-finger");
   const mStatus = $("#m-status");
@@ -144,6 +153,16 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   let activeStatus: HTMLElement | null = null;
   const unlisten = onTouchNeeded((name) => {
     if (activeStatus) activeStatus.textContent = name ? `Touch ${name}` : "Touch your YubiKey";
+  });
+  // Only while enabling the fingerprint, when the icon is shown.
+  const unlistenFinger = onFingerStatus((s) => {
+    if (fingerScan.hidden) return;
+    if (s.state === "scanning") setFingerState(fingerScan, "scanning");
+    else if (s.state === "retry") setFingerLine(fingerScan, s.message ?? "");
+    else {
+      setFingerState(fingerScan, "no_match");
+      setFingerLine(fingerScan, "Not recognized.");
+    }
   });
 
   /** Runs one vault change with both cards disabled and the touch status in `statusEl`. */
@@ -170,7 +189,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     modeHintEl.textContent = changing ? modeHint(from, to) : "";
     const needsPassword = changing && (to === "password_yubikey" || from.mode === "password_yubikey");
     modePw.hidden = !needsPassword;
-    modeName.hidden = !(changing && to === "password_yubikey");
+    modeName.hidden = modePin.hidden = !(changing && to === "password_yubikey");
     modeActions.hidden = !changing;
   }
 
@@ -252,7 +271,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     try {
       await withDevice(mStatus, work, startText);
       mOk.textContent = okText;
-      modePw.value = addPw.value = "";
+      modePw.value = addPw.value = modePin.value = addPin.value = "";
     } catch (e) {
       mErr.textContent = String(e);
     }
@@ -274,7 +293,8 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     }
     const password = needsPassword ? modePw.value : null;
     const name = to === "password_yubikey" ? modeName.value : null;
-    change(() => setMode(to, password, name), "Unlock method changed");
+    const pin = to === "password_yubikey" && modePin.value ? modePin.value : null;
+    change(() => setMode(to, password, name, pin), "Unlock method changed");
   });
 
   addForm.addEventListener("submit", (e) => {
@@ -287,12 +307,21 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     }
     const name = addName.value;
     const password = addPw.value;
-    change(() => yubikeyAdd(name, password), "YubiKey added");
+    const pin = addPin.value || null;
+    change(() => yubikeyAdd(name, password, pin), "YubiKey added");
   });
 
   finger.addEventListener("change", () => {
-    if (finger.checked) change(fingerprintEnable, "Fingerprint unlock is on", "Scan your finger");
-    else change(fingerprintDisable, "Fingerprint unlock is off");
+    if (!finger.checked) {
+      change(fingerprintDisable, "Fingerprint unlock is off");
+      return;
+    }
+    setFingerState(fingerScan, "scanning");
+    setFingerLine(fingerScan, "");
+    fingerScan.hidden = false;
+    change(fingerprintEnable, "Fingerprint unlock is on", "Scan your finger").finally(() => {
+      fingerScan.hidden = true;
+    });
   });
 
   // Change password card.
@@ -330,5 +359,6 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   return () => {
     window.removeEventListener("keydown", onKey);
     unlisten.then((off) => off());
+    unlistenFinger.then((off) => off());
   };
 }

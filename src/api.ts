@@ -53,8 +53,20 @@ export interface UnlockMethods {
   fingerprint: boolean;
   can_yubikey: boolean;
   can_fingerprint: boolean;
+  /** The lock screen may poll for a plugged-in key and ask for a touch by itself. */
+  auto_yubikey: boolean;
   platform: string;
 }
+
+export interface FingerStatus {
+  state: "scanning" | "retry" | "no_match";
+  message: string | null;
+}
+
+/** Error texts the lock screen reacts to (from `DeviceError` in Rust). */
+export const CANCELLED = "Cancelled.";
+export const TIMED_OUT = "Timed out waiting. Try again.";
+export const NO_YUBIKEY_FOUND = "No YubiKey found. Plug it in and try again.";
 
 export const vaultStatus = () => invoke<VaultStatus>("vault_status");
 export const vaultCreate = (password: string) => invoke<void>("vault_create", { password });
@@ -91,19 +103,24 @@ export const vaultUnlockYubikey = () => invoke<void>("vault_unlock_yubikey");
 export const vaultUnlockFingerprint = () => invoke<void>("vault_unlock_fingerprint");
 export const vaultUnlockTwoFactor = (password: string) =>
   invoke<void>("vault_unlock_two_factor", { password });
-export const yubikeyAdd = (name: string, password: string) =>
-  invoke<void>("yubikey_add", { name, password });
+export const unlockCancel = () => invoke<void>("unlock_cancel");
+export const yubikeyPresent = () => invoke<boolean>("yubikey_present");
+export const yubikeyAdd = (name: string, password: string, pin: string | null) =>
+  invoke<void>("yubikey_add", { name, password, pin });
 export const yubikeyRemove = (id: string) => invoke<void>("yubikey_remove", { id });
 export const fingerprintEnable = () => invoke<void>("fingerprint_enable");
 export const fingerprintDisable = () => invoke<void>("fingerprint_disable");
-export const setMode = (mode: Mode, password: string | null, name: string | null) =>
-  invoke<void>("set_mode", { mode, password, name });
+export const setMode = (mode: Mode, password: string | null, name: string | null, pin: string | null) =>
+  invoke<void>("set_mode", { mode, password, name, pin });
 
 export const onLocked = (cb: () => void): Promise<UnlistenFn> => listen("locked", () => cb());
 export const onTheme = (cb: (p: Palette) => void): Promise<UnlistenFn> =>
   listen<Palette>("theme", (e) => cb(e.payload));
 export const onCameraFrame = (cb: (f: CameraFrame) => void): Promise<UnlistenFn> =>
   listen<CameraFrame>("camera-frame", (e) => cb(e.payload));
+/** Fired while a fingerprint scan runs. */
+export const onFingerStatus = (cb: (s: FingerStatus) => void): Promise<UnlistenFn> =>
+  listen<FingerStatus>("finger-status", (e) => cb(e.payload));
 /** Fired before each YubiKey touch; `name` is the key to touch, or null for any registered key. */
 export const onTouchNeeded = (cb: (name: string | null) => void): Promise<UnlistenFn> =>
   listen<{ name: string | null }>("touch-needed", (e) => cb(e.payload.name));
