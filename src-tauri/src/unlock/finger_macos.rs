@@ -51,7 +51,7 @@ pub use imp::TouchIdFinger;
 mod imp {
     use rand::RngCore;
     use rand::rngs::OsRng;
-    use security_framework::access_control::SecAccessControl;
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
     use security_framework::passwords::{
         AccessControlOptions, PasswordOptions, delete_generic_password_options, generic_password,
         set_generic_password_options,
@@ -85,9 +85,11 @@ mod imp {
     }
 
     fn store(slot_id: &str, secret: &[u8; 32]) -> Result<(), DeviceError> {
-        let access =
-            SecAccessControl::create_with_flags(AccessControlOptions::BIOMETRY_CURRENT_SET.bits())
-                .map_err(os_error)?;
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenPasscodeSetThisDeviceOnly),
+            AccessControlOptions::BIOMETRY_CURRENT_SET.bits(),
+        )
+        .map_err(os_error)?;
         let mut options = options(slot_id);
         options.set_access_control(access);
         set_generic_password_options(secret, options).map_err(os_error)

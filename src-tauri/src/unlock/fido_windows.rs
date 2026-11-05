@@ -353,13 +353,13 @@ mod imp {
         // SAFETY: non-null, owned by the assertion.
         let secret = unsafe { &*a.pHmacSecret };
         // SAFETY: webauthn.dll returns `cbFirst` bytes at `pbFirst`.
-        let out = hmac_output(unsafe { bytes(secret.pbFirst, secret.cbFirst) })?;
-        // Wipe the library's copy before it is freed.
+        let out = hmac_output(unsafe { bytes(secret.pbFirst, secret.cbFirst) });
+        // Wipe the library's copy before it is freed, whatever its length.
         if !secret.pbFirst.is_null() {
             // SAFETY: the same `cbFirst` writable bytes, still owned by the assertion.
             unsafe { ptr::write_bytes(secret.pbFirst, 0, secret.cbFirst as usize) };
         }
-        Ok((id, out))
+        Ok((id, out?))
     }
 
     impl HmacKey for WebAuthnKey {
