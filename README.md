@@ -34,9 +34,32 @@ Release builds are unsigned, see [Releases](#releases).
 Read this before you use it.
 
 - The codes live on the same computer as your passwords. If someone gets into this computer, they get both factors.
-- Your master password is the only protection. The vault is an encrypted file (Argon2id key derivation, XChaCha20-Poly1305).
-- There is no recovery. If you forget the master password, the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
+- The vault is an encrypted file (Argon2id key derivation, XChaCha20-Poly1305). What opens it depends on the unlock mode: the password alone, the password or a YubiKey or your fingerprint, or the password and a YubiKey together. See [Unlock with a YubiKey or fingerprint](#unlock-with-a-yubikey-or-fingerprint).
+- There is no recovery. If none of your ways in works any more (for example you forget the password and have no YubiKey or fingerprint set up, or in "Password and YubiKey together" you lose the password or every key), the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
 - The app locks itself after 5 minutes of no use. A copied code is cleared from the clipboard after 30 seconds.
+
+## Unlock with a YubiKey or fingerprint
+
+Settings > Unlock methods has three modes:
+
+- **Password only.** Only the master password opens the vault.
+- **Password, YubiKey or fingerprint.** Any one of them opens the vault. The password always works, so it is your way back in.
+- **Password and YubiKey together.** You need the password and a touch of a registered YubiKey. Nothing else opens the vault. Register a backup key: if you lose your only key, you lose the vault.
+
+The YubiKey uses FIDO2 `hmac-secret` with a touch only. Adding a YubiKey asks for your current password, and a key that is already registered is refused. If the key has a FIDO2 PIN, type it in the "YubiKey PIN" field when you register the key. Unlocking never asks for the PIN, only for a touch.
+
+In "Password, YubiKey or fingerprint" the lock screen listens by itself, but only while the Deskauth window is focused: it starts a fingerprint scan, and asks for a touch when a YubiKey is plugged in (any FIDO key is asked; one that is not registered shows "not registered" after the touch). When the window loses focus it lets go of the reader and stops asking the key, so `sudo`, the screen locker and your browser can use them. You can type the password at the same time. On Windows the YubiKey still needs a click on "Use YubiKey", so its dialog does not pop up by itself.
+
+- Linux needs the usual udev rules for FIDO keys. On Arch the `libfido2` package provides them.
+- Windows needs Windows 11 22H2 or later (WebAuthn API v4) for the YubiKey. Windows shows its own touch dialog. The fingerprint uses Windows Hello.
+- macOS uses Touch ID for the fingerprint. It needs a signed build with the `keychain-access-groups` entitlement. Unsigned builds show "Touch ID unlock needs a signed build of Deskauth."
+- macOS and Windows unlock methods are untested on real hardware so far.
+
+On Linux the fingerprint is convenience, not extra security: the secret it guards sits in your keyring, and any program running as you can read it while you are logged in.
+
+Removing a lost YubiKey does not protect old copies of `vault.json`. An old copy plus that key still opens the accounts that existed then. Switching into or out of "Password and YubiKey together" makes a fresh vault key.
+
+The first unlock with this version upgrades `vault.json` to the new format (v2). Older Deskauth versions cannot open a v2 vault, so keep a backup of `vault.json` before that first unlock.
 
 ## Import from Google Authenticator
 

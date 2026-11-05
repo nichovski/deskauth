@@ -69,7 +69,7 @@ button.ghost {
   border-color: var(--muted);
 }
 
-button.ghost:hover {
+button.ghost:hover:not(:disabled) {
   color: var(--fg-bright);
 }
 
@@ -427,4 +427,269 @@ button[hidden] {
 
 .row.editing > :not(.edit) {
   display: none;
+}
+
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings .card {
+  margin: 0 auto;
+}
+
+.settings .card + .card {
+  border-top: 1px solid var(--muted);
+}
+
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#methods {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stack[hidden],
+.actions[hidden],
+.switch[hidden] {
+  display: none;
+}
+
+h2 {
+  margin: 8px 0 0;
+  font-size: 15px;
+  color: var(--fg-bright);
+}
+
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.option > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.option .label {
+  color: var(--fg-bright);
+}
+
+.option .line {
+  font-size: 12px;
+}
+
+.option input,
+.switch input {
+  margin: 3px 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-bright);
+  cursor: pointer;
+}
+
+.switch input {
+  margin: 0;
+}
+
+.keys {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keys li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.keys button {
+  padding: 4px 10px;
+}
+
+/* Fingerprint icon: pulse and sweep while scanning, shake on no match. */
+.finger {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.finger[hidden] {
+  display: none;
+}
+
+.finger svg {
+  width: 56px;
+  height: 56px;
+  color: var(--fg-dim);
+  transition: color 0.2s;
+}
+
+.finger .ridges {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.finger .scan {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0;
+}
+
+.finger[data-state="scanning"] svg {
+  color: var(--fg);
+  animation: finger-pulse 1.6s ease-in-out infinite;
+}
+
+.finger[data-state="scanning"] .scan {
+  opacity: 0.8;
+  animation: finger-sweep 1.6s ease-in-out infinite alternate;
+}
+
+.finger[data-state="no_match"] svg {
+  color: var(--danger);
+  animation: finger-shake 0.6s ease-in-out;
+}
+
+.finger[data-state="match"] svg {
+  color: var(--ok);
+}
+
+.finger-line {
+  min-height: 1.4em;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Touch prompt: large line below the button that started the device call, with a pulsing key. */
+.prompt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--fg-bright);
+}
+
+.prompt[hidden] {
+  display: none;
+}
+
+.prompt-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  animation: prompt-pulse 1.6s ease-in-out infinite;
+}
+
+.prompt.no-icon .prompt-icon {
+  display: none;
+}
+
+@keyframes finger-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes finger-sweep {
+  from {
+    transform: translateY(8px);
+  }
+  to {
+    transform: translateY(42px);
+  }
+}
+
+@keyframes finger-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-5px);
+  }
+  40%,
+  80% {
+    transform: translateX(5px);
+  }
+}
+
+@keyframes prompt-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+/* Same specificity as the rules above, later in the file: colour changes only. */
+@media (prefers-reduced-motion: reduce) {
+  .finger[data-state] svg,
+  .finger[data-state] .scan,
+  .prompt-icon {
+    animation: none;
+  }
+
+  .finger[data-state] .scan {
+    opacity: 0;
+  }
+
+  .finger[data-state="scanning"] svg {
+    color: var(--accent);
+  }
 }

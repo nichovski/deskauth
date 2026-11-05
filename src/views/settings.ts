@@ -1,35 +1,346 @@
-import { vaultChangePassword } from "../api";
+import {
+  fingerprintDisable,
+  fingerprintEnable,
+  onFingerStatus,
+  onTouchNeeded,
+  setMode,
+  unlockMethods,
+  vaultChangePassword,
+  yubikeyAdd,
+  yubikeyRemove,
+  type Mode,
+  type UnlockMethods,
+} from "../api";
 import type { Go } from "../main";
+import { confirmDialog } from "./confirm";
+import { fingerprintHtml, setFingerLine, setFingerState } from "./fingerprint";
+import { promptHtml, showPrompt, touchText } from "./prompt";
 
 const MIN_LENGTH = 8;
+const DEFAULT_KEY_NAME = "YubiKey";
+const NO_YUBIKEY = "No YubiKey support on this system.";
+const PIN_PLACEHOLDER = "YubiKey PIN (if it has one)";
+
+const MODES: { mode: Mode; label: string; line: string }[] = [
+  { mode: "password", label: "Password only", line: "Only your password opens the vault." },
+  {
+    mode: "any",
+    label: "Password, YubiKey or fingerprint",
+    line: "Any one of them opens the vault. The password always works.",
+  },
+  {
+    mode: "password_yubikey",
+    label: "Password and YubiKey together",
+    line: "You need the password and a touch of a registered YubiKey.",
+  },
+];
+
+/** What a mode change asks for, and what it removes. */
+function modeHint(from: UnlockMethods, to: Mode): string {
+  const hasMethods = from.yubikeys.length > 0 || from.fingerprint;
+  if (to === "password_yubikey") {
+    const removed = hasMethods ? " Your other YubiKeys and the fingerprint are removed." : "";
+    return `Type your password and name the new YubiKey, then touch it when asked.${removed}`;
+  }
+  if (from.mode === "password_yubikey") {
+    return "Type your password, then touch a registered YubiKey when asked. Your YubiKeys are removed.";
+  }
+  if (to === "password" && hasMethods) return "Your YubiKeys and the fingerprint are removed.";
+  return "";
+}
 
 export function renderSettings(root: HTMLElement, go: Go): () => void {
   root.innerHTML = `
-    <form class="card">
-      <h1>Change password</h1>
-      <input id="current" type="password" placeholder="Current password" autocomplete="current-password" />
-      <input id="pw" type="password" placeholder="New password" autocomplete="new-password" />
-      <input id="pw2" type="password" placeholder="Confirm new password" autocomplete="new-password" />
-      <p class="error" id="err"></p>
-      <p class="ok" id="ok"></p>
-      <div class="actions">
-        <button type="button" id="back" class="ghost">Back</button>
-        <button type="submit">Change password</button>
-      </div>
-    </form>`;
-  const form = root.querySelector("form")!;
-  const current = root.querySelector<HTMLInputElement>("#current")!;
-  const pw = root.querySelector<HTMLInputElement>("#pw")!;
-  const pw2 = root.querySelector<HTMLInputElement>("#pw2")!;
-  const err = root.querySelector<HTMLElement>("#err")!;
-  const ok = root.querySelector<HTMLElement>("#ok")!;
-  const submit = root.querySelector<HTMLButtonElement>("button[type=submit]")!;
-  current.focus();
+    <div class="settings">
+      <section class="card">
+        <h1>Unlock methods</h1>
+        <fieldset id="methods">
+          <form id="mode-form" class="stack">
+            ${MODES.map(
+              (o) => `
+              <label class="option">
+                <input type="radio" name="mode" value="${o.mode}" />
+                <span><span class="label">${o.label}</span><span class="dim line">${o.line}</span></span>
+              </label>`,
+            ).join("")}
+            <p class="dim" id="mode-hint"></p>
+            <input id="mode-pw" type="password" placeholder="Current password" autocomplete="current-password" hidden />
+            <input id="mode-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" hidden />
+            <input id="mode-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" hidden />
+            <div class="actions" id="mode-actions" hidden><button type="submit">Apply</button></div>
+            ${promptHtml("mode-prompt")}
+          </form>
+          <p class="warn" id="one-key" hidden>Only one YubiKey is registered. If you lose it, you lose this vault. Add a backup key.</p>
+          <div id="keys-section" class="stack">
+            <h2>YubiKeys</h2>
+            <ul class="keys" id="keys"></ul>
+            <p class="dim" id="no-yubikey" hidden>${NO_YUBIKEY}</p>
+            <form id="add-form" class="stack">
+              <input id="add-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" />
+              <input id="add-pw" type="password" placeholder="Current password" autocomplete="current-password" />
+              <input id="add-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" />
+              <div class="actions"><button type="submit">Add YubiKey</button></div>
+              ${promptHtml("add-prompt")}
+            </form>
+          </div>
+          <div id="finger-section" class="stack">
+            <h2>Fingerprint</h2>
+            <label class="switch" id="finger-label"><input type="checkbox" id="finger" /> Unlock with fingerprint</label>
+            ${promptHtml("finger-prompt")}
+            ${fingerprintHtml("finger-scan")}
+            <p class="dim" id="finger-note" hidden>Any program running as you can read the keyring item while you are logged in, so on Linux the fingerprint is convenience, not extra security.</p>
+            <p class="dim" id="no-finger" hidden>No fingerprint reader found.</p>
+          </div>
+          <p class="error" id="m-err"></p>
+          <p class="ok" id="m-ok"></p>
+        </fieldset>
+      </section>
+      <form class="card" id="pw-form">
+        <h1>Change password</h1>
+        <input id="current" type="password" placeholder="Current password" autocomplete="current-password" />
+        <input id="pw" type="password" placeholder="New password" autocomplete="new-password" />
+        <input id="pw2" type="password" placeholder="Confirm new password" autocomplete="new-password" />
+        <p class="dim" id="touch-each" hidden>You will touch each registered YubiKey.</p>
+        <p class="error" id="err"></p>
+        <p class="ok" id="ok"></p>
+        <div class="actions">
+          <button type="button" id="back" class="ghost">Back</button>
+          <button type="submit">Change password</button>
+        </div>
+        ${promptHtml("pw-prompt")}
+      </form>
+    </div>`;
+  const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
 
-  root.querySelector("#back")!.addEventListener("click", () => go("list"));
-  form.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") go("list");
+  // Unlock methods card.
+  const methods = $<HTMLFieldSetElement>("#methods");
+  const modeForm = $<HTMLFormElement>("#mode-form");
+  const radios = [...root.querySelectorAll<HTMLInputElement>("input[name=mode]")];
+  const modeHintEl = $("#mode-hint");
+  const modePw = $<HTMLInputElement>("#mode-pw");
+  const modeName = $<HTMLInputElement>("#mode-name");
+  const modePin = $<HTMLInputElement>("#mode-pin");
+  const modeActions = $("#mode-actions");
+  const modePrompt = $("#mode-prompt");
+  const oneKey = $("#one-key");
+  const keysSection = $("#keys-section");
+  const keys = $("#keys");
+  const noYubikey = $("#no-yubikey");
+  const addForm = $<HTMLFormElement>("#add-form");
+  const addName = $<HTMLInputElement>("#add-name");
+  const addPw = $<HTMLInputElement>("#add-pw");
+  const addPin = $<HTMLInputElement>("#add-pin");
+  const addPrompt = $("#add-prompt");
+  const fingerSection = $("#finger-section");
+  const fingerLabel = $("#finger-label");
+  const finger = $<HTMLInputElement>("#finger");
+  const fingerPrompt = $("#finger-prompt");
+  const fingerScan = $("#finger-scan");
+  const fingerNote = $("#finger-note");
+  const noFinger = $("#no-finger");
+  const mErr = $("#m-err");
+  const mOk = $("#m-ok");
+
+  // Change password card.
+  const form = $<HTMLFormElement>("#pw-form");
+  const current = $<HTMLInputElement>("#current");
+  const pw = $<HTMLInputElement>("#pw");
+  const pw2 = $<HTMLInputElement>("#pw2");
+  const touchEach = $("#touch-each");
+  const pwPrompt = $("#pw-prompt");
+  const err = $("#err");
+  const ok = $("#ok");
+  const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+
+  let m: UnlockMethods | null = null;
+  let busy = false;
+  // The prompt below the button of the device call that is running, if any.
+  let activePrompt: HTMLElement | null = null;
+  const unlisten = onTouchNeeded((t) => {
+    if (activePrompt) showPrompt(activePrompt, touchText(t));
   });
+  // Only while enabling the fingerprint, when the icon is shown.
+  const unlistenFinger = onFingerStatus((s) => {
+    if (fingerScan.hidden) return;
+    if (s.state === "scanning") setFingerState(fingerScan, "scanning");
+    else if (s.state === "retry") setFingerLine(fingerScan, s.message ?? "");
+    else {
+      setFingerState(fingerScan, "no_match");
+      setFingerLine(fingerScan, "Not recognized.");
+    }
+  });
+
+  /**
+   * Runs one vault change with both cards disabled and its touch prompt in `prompt`;
+   * `scanText` is shown (without the key icon) from the start.
+   */
+  async function withDevice(prompt: HTMLElement, work: () => Promise<void>, scanText = "") {
+    busy = methods.disabled = submit.disabled = true;
+    activePrompt = prompt;
+    showPrompt(prompt, scanText, false);
+    try {
+      await work();
+    } finally {
+      busy = methods.disabled = submit.disabled = false;
+      activePrompt = null;
+      showPrompt(prompt, "");
+    }
+  }
+
+  const selectedMode = (): Mode | undefined =>
+    MODES.find((o) => radios.some((r) => r.checked && r.value === o.mode))?.mode;
+
+  function showModeForm() {
+    const to = selectedMode();
+    const from = m;
+    const changing = from !== null && to !== undefined && to !== from.mode;
+    modeHintEl.textContent = changing ? modeHint(from, to) : "";
+    const needsPassword = changing && (to === "password_yubikey" || from.mode === "password_yubikey");
+    modePw.hidden = !needsPassword;
+    modeName.hidden = modePin.hidden = !(changing && to === "password_yubikey");
+    modeActions.hidden = !changing;
+  }
+
+  function showKeys(info: UnlockMethods) {
+    const twoFactor = info.mode === "password_yubikey";
+    keys.replaceChildren();
+    if (info.yubikeys.length === 0) {
+      const li = document.createElement("li");
+      li.className = "dim";
+      li.textContent = "No YubiKey added yet.";
+      keys.append(li);
+    }
+    for (const key of info.yubikeys) {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "text";
+      name.textContent = key.name;
+      li.append(name);
+      // The last key in two-factor mode cannot be removed.
+      if (!(twoFactor && info.yubikeys.length === 1)) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "ghost danger";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", async () => {
+          const yes = await confirmDialog(
+            `Remove the YubiKey "${key.name}"? It will no longer unlock this vault.`,
+            "Remove",
+          );
+          if (yes) change(() => yubikeyRemove(key.id), "YubiKey removed", addPrompt);
+        });
+        li.append(remove);
+      }
+      keys.append(li);
+    }
+  }
+
+  function show(info: UnlockMethods) {
+    m = info;
+    for (const r of radios) {
+      r.checked = r.value === info.mode;
+      const blocked = r.value === "password_yubikey" && !info.can_yubikey && info.mode !== "password_yubikey";
+      r.disabled = blocked;
+      const line = r.parentElement!.querySelector<HTMLElement>(".line")!;
+      line.textContent = blocked ? NO_YUBIKEY : MODES.find((o) => o.mode === r.value)!.line;
+    }
+    showModeForm();
+    const twoFactor = info.mode === "password_yubikey";
+    oneKey.hidden = !(twoFactor && info.yubikeys.length === 1);
+
+    keysSection.hidden = info.mode === "password";
+    showKeys(info);
+    noYubikey.hidden = info.can_yubikey;
+    addForm.hidden = !info.can_yubikey;
+
+    fingerSection.hidden = info.mode !== "any";
+    // A set-up fingerprint can be turned off even when the reader is gone.
+    fingerLabel.hidden = !(info.can_fingerprint || info.fingerprint);
+    finger.checked = info.fingerprint;
+    fingerNote.hidden = fingerLabel.hidden || info.platform !== "linux";
+    noFinger.hidden = info.can_fingerprint;
+
+    touchEach.hidden = !twoFactor;
+  }
+
+  async function refresh() {
+    try {
+      show(await unlockMethods());
+    } catch (e) {
+      mErr.textContent = String(e);
+    }
+  }
+
+  /** Runs one change of the unlock methods, then shows the new state. */
+  async function change(work: () => Promise<void>, okText: string, prompt: HTMLElement, scanText = "") {
+    mErr.textContent = "";
+    mOk.textContent = "";
+    const focused = document.activeElement;
+    try {
+      await withDevice(prompt, work, scanText);
+      mOk.textContent = okText;
+      modePw.value = addPw.value = modePin.value = addPin.value = "";
+    } catch (e) {
+      mErr.textContent = String(e);
+    }
+    await refresh();
+    if (focused instanceof HTMLElement && focused.offsetParent !== null && !focused.matches(":disabled")) focused.focus();
+    else radios.find((r) => r.checked)?.focus();
+  }
+
+  for (const r of radios) r.addEventListener("change", showModeForm);
+  modeForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const to = selectedMode();
+    if (!m || !to || to === m.mode) return;
+    const needsPassword = to === "password_yubikey" || m.mode === "password_yubikey";
+    if (needsPassword && !modePw.value) {
+      mErr.textContent = "Type your password to continue";
+      modePw.focus();
+      return;
+    }
+    const password = needsPassword ? modePw.value : null;
+    const name = to === "password_yubikey" ? modeName.value : null;
+    const pin = to === "password_yubikey" && modePin.value ? modePin.value : null;
+    change(() => setMode(to, password, name, pin), "Unlock method changed", modePrompt);
+  });
+
+  addForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!m) return;
+    if (!addPw.value) {
+      mErr.textContent = "Type your password to continue";
+      addPw.focus();
+      return;
+    }
+    const name = addName.value;
+    const password = addPw.value;
+    const pin = addPin.value || null;
+    change(() => yubikeyAdd(name, password, pin), "YubiKey added", addPrompt);
+  });
+
+  finger.addEventListener("change", () => {
+    if (!finger.checked) {
+      change(fingerprintDisable, "Fingerprint unlock is off", fingerPrompt);
+      return;
+    }
+    setFingerState(fingerScan, "scanning");
+    setFingerLine(fingerScan, "");
+    fingerScan.hidden = false;
+    change(fingerprintEnable, "Fingerprint unlock is on", fingerPrompt, "Scan your finger").finally(() => {
+      fingerScan.hidden = true;
+    });
+  });
+
+  // Change password card.
+  const back = () => {
+    if (!busy) go("list");
+  };
+  $("#back").addEventListener("click", back);
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") back();
+  };
+  window.addEventListener("keydown", onKey);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     err.textContent = "";
@@ -42,16 +353,20 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
       err.textContent = "Passwords do not match";
       return;
     }
-    submit.disabled = true;
     try {
-      await vaultChangePassword(current.value, pw.value);
+      await withDevice(pwPrompt, () => vaultChangePassword(current.value, pw.value));
       current.value = pw.value = pw2.value = "";
       ok.textContent = "Password changed";
     } catch (e) {
       err.textContent = String(e);
       current.select();
     }
-    submit.disabled = false;
   });
-  return () => {};
+
+  refresh().then(() => radios.find((r) => r.checked)?.focus());
+  return () => {
+    window.removeEventListener("keydown", onKey);
+    unlisten.then((off) => off());
+    unlistenFinger.then((off) => off());
+  };
 }

@@ -25,6 +25,7 @@ zeroize = "1"
 rand = "0.8"
 base32 = "0.5"
 base64 = "0.22"
+hkdf = "0.12"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
@@ -38,6 +39,29 @@ nokhwa = { version = "0.10", features = ["input-native"] }
 notify = "6"
 toml = "0.8"
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+ctap-hid-fido2 = "3.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+keyring = { version = "3", features = ["async-secret-service", "async-io", "crypto-rust"] }
+async-io = "2"
+futures-lite = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Security_Credentials",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 qrcode = "0.14"
