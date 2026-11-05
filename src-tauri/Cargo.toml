@@ -49,6 +49,9 @@ keyring = { version = "3", features = ["async-secret-service", "async-io", "cryp
 async-io = "2"
 futures-lite = "2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] }
+
 [dev-dependencies]
 qrcode = "0.14"
 tempfile = "3"

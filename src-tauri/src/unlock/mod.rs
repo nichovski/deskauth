@@ -9,6 +9,8 @@ use zeroize::Zeroizing;
 mod fido_hid;
 #[cfg(target_os = "linux")]
 mod finger_linux;
+#[cfg(any(test, target_os = "macos"))]
+mod finger_macos;
 
 #[derive(Debug, PartialEq)]
 pub enum DeviceError {
@@ -75,15 +77,15 @@ pub trait Fingerprint: Send + Sync {
 }
 
 /// Used on platforms without a device implementation.
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 struct Stub;
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 fn unsupported() -> DeviceError {
     DeviceError::Unsupported("Not supported on this system.".into())
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 impl HmacKey for Stub {
     fn available(&self) -> bool {
         false
@@ -99,7 +101,7 @@ impl HmacKey for Stub {
     }
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
 impl Fingerprint for Stub {
     fn available(&self) -> bool {
         false
@@ -133,7 +135,12 @@ pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
     Box::new(finger_linux::FprintdFinger)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
+    Box::new(finger_macos::TouchIdFinger)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
     Box::new(Stub)
 }
