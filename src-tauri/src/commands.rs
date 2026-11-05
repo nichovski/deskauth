@@ -106,8 +106,10 @@ pub(crate) const LOCKED: &str = "Vault is locked";
 const BUSY: &str = "Another vault change is in progress. Try again.";
 
 /// Takes the file-writer lock without waiting: a YubiKey touch can hold it for 30 s, and sync
-/// commands run on the main thread.
+/// commands run on the main thread. Counts as activity, so auto-lock does not end a long
+/// operation the user just started.
 pub(crate) fn begin(state: &AppState) -> Result<MutexGuard<'_, ()>, String> {
+    state.touch();
     state.ops.try_lock().map_err(|_| BUSY.to_string())
 }
 

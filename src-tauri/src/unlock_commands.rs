@@ -156,8 +156,9 @@ pub fn unlock_two_factor(state: &AppState, password: &str, emit: Emit) -> Result
     Ok(())
 }
 
-/// In `any` mode the new key unlocks on its own. In `password_yubikey` mode the password must
-/// first open the vault with a registered key, and the new key's slot is made from it.
+/// The password is needed in both modes. In `any` mode it must open the file, and the new key
+/// then unlocks on its own. In `password_yubikey` mode it must open the file with a registered
+/// key, and the new key's slot is made from it. A key that is already registered refuses.
 pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, emit: Emit) -> Result<(), String> {
     let _ops = commands::begin(state)?;
     let info = current_info(state)?;
@@ -165,17 +166,21 @@ pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, emit: E
     if name.is_empty() {
         return Err("Give the YubiKey a name".into());
     }
+    let registered: Vec<Vec<u8>> = info.yubikeys.iter().map(|k| k.credential_id.clone()).collect();
     match info.mode {
         Mode::Any => {
+            let password = password.ok_or(PASSWORD_NEEDED)?;
+            // Verify against the file; the copy is dropped (and wiped) right away.
+            vault::unlock(&state.vault_path, password).map_err(vault_err)?;
             emit(Some(name));
-            let e = state.hmac_key.enroll().map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered).map_err(device_err)?;
             with_vault(state, |v| v.add_yubikey(name, &e.credential_id, e.salt, &e.hmac))?;
         }
         Mode::PasswordYubikey => {
             let password = password.ok_or(PASSWORD_NEEDED)?;
             verify_two_factor(state, &info.yubikeys, password, emit)?;
             emit(Some(name));
-            let e = state.hmac_key.enroll().map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             with_vault(state, |v| v.add_yubikey_two_factor(name, &e.credential_id, e.salt, kek))?;
         }
@@ -237,7 +242,8 @@ pub fn set_mode(state: &AppState, mode: Mode, password: Option<&str>, name: Opti
             vault::unlock(&state.vault_path, password).map_err(vault_err)?;
             let name = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(DEFAULT_KEY_NAME);
             emit(Some(name));
-            let e = state.hmac_key.enroll().map_err(device_err)?;
+            // Every existing slot is replaced, so an already registered key may be used again.
+            let e = state.hmac_key.enroll(&[]).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             let removed = with_vault(state, |v| v.to_two_factor_mode(name, &e.credential_id, e.salt, kek))?;
             disable_fingerprints(state, &removed);
@@ -373,7 +379,7 @@ mod tests {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
         let names = std::cell::RefCell::new(Vec::new());
-        yubikey_add(&s.state, "Blue", None, &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
         assert_eq!(*names.borrow(), [Some("Blue".to_string())]);
         commands::lock(&s.state);
         unlock_yubikey(&s.state, &no_emit).unwrap();
@@ -386,11 +392,11 @@ mod tests {
     fn unknown_key_is_not_registered() {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
         commands::lock(&s.state);
         // A different key is plugged in.
         s.key.creds.lock().unwrap().clear();
-        s.key.enroll().unwrap();
+        s.key.enroll(&[]).unwrap();
         assert_eq!(unlock_yubikey(&s.state, &no_emit), Err(NOT_REGISTERED.into()));
         assert!(!unlocked(&s.state));
     }
@@ -399,7 +405,7 @@ mod tests {
     fn remove_key() {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
         let id = unlock_methods(&s.state).unwrap().yubikeys[0].id.clone();
         assert_eq!(yubikey_remove(&s.state, "nope"), Err(NOT_REGISTERED.into()));
         yubikey_remove(&s.state, &id).unwrap();
@@ -516,6 +522,8 @@ mod tests {
         assert_eq!(yubikey_add(&s.state, "Red", None, &no_emit), Err(PASSWORD_NEEDED.into()));
         assert_eq!(yubikey_add(&s.state, "Red", Some("bad"), &no_emit), Err("Wrong password".into()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
+        // The backup key is plugged in next to Blue.
+        *s.key.device.lock().unwrap() = 1;
         let count = Cell::new(0);
         yubikey_add(&s.state, "Red", Some("pw"), &|_| count.set(count.get() + 1)).unwrap();
         // One touch to prove the password with a registered key, one to enroll.
@@ -525,12 +533,87 @@ mod tests {
     }
 
     #[test]
+    fn add_in_any_mode_needs_the_password() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        let before = std::fs::read(&s.path).unwrap();
+        assert_eq!(yubikey_add(&s.state, "Blue", None, &no_emit), Err(PASSWORD_NEEDED.into()));
+        assert_eq!(yubikey_add(&s.state, "Blue", Some("bad"), &no_emit), Err("Wrong password".into()));
+        assert!(s.key.creds.lock().unwrap().is_empty(), "no touch before the password is checked");
+        assert_eq!(std::fs::read(&s.path).unwrap(), before);
+        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
+    }
+
+    #[test]
+    fn adding_the_same_key_again_fails() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        let before = std::fs::read(&s.path).unwrap();
+        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
+        assert_eq!(std::fs::read(&s.path).unwrap(), before);
+        assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
+
+        // Two-factor mode: Blue proves the password, then refuses to register twice.
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        let before = std::fs::read(&s.path).unwrap();
+        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
+        assert_eq!(std::fs::read(&s.path).unwrap(), before);
+        assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
+    }
+
+    /// A key that answers with a credential and hmac this vault never saw.
+    struct StrangerKey;
+
+    impl HmacKey for StrangerKey {
+        fn available(&self) -> bool {
+            true
+        }
+        fn enroll(&self, _exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+            Err(DeviceError::Other("not used".into()))
+        }
+        fn assert(&self, _allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
+            Ok((b"stranger".to_vec(), Zeroizing::new([7u8; 32])))
+        }
+    }
+
+    #[test]
+    fn leaving_two_factor_with_a_wrong_key_writes_nothing() {
+        let s = setup();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        let before = std::fs::read(&s.path).unwrap();
+
+        // An unregistered key is plugged in instead of Blue.
+        let blue = std::mem::take(&mut *s.key.creds.lock().unwrap());
+        s.key.enroll(&[]).unwrap();
+        for to in [Mode::Any, Mode::Password] {
+            assert_eq!(set_mode(&s.state, to, Some("pw"), None, &no_emit), Err(NOT_REGISTERED.into()));
+            assert_eq!(std::fs::read(&s.path).unwrap(), before);
+            assert_eq!(mode(&s.state), Mode::PasswordYubikey);
+        }
+
+        // A key that answers with a credential the vault does not know.
+        let stranger = AppState::with_devices(s.path.clone(), Arc::new(StrangerKey), s.finger.clone());
+        *stranger.vault.lock().unwrap() = s.state.vault.lock().unwrap().take();
+        assert!(set_mode(&stranger, Mode::Any, Some("pw"), None, &no_emit).is_err());
+        assert_eq!(std::fs::read(&s.path).unwrap(), before);
+        assert_eq!(mode(&stranger), Mode::PasswordYubikey);
+
+        // The old mode still unlocks with the right key.
+        *s.key.creds.lock().unwrap() = blue;
+        commands::lock(&s.state);
+        unlock_two_factor(&s.state, "pw", &no_emit).unwrap();
+        assert_eq!(labels(&s.state.vault.lock().unwrap().as_ref().unwrap().accounts), ["Acme/me"]);
+    }
+
+    #[test]
     fn timeout_leaves_file_unchanged() {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
         *s.key.next.lock().unwrap() = Some(DeviceError::Timeout);
-        assert_eq!(yubikey_add(&s.state, "Blue", None, &no_emit), Err(DeviceError::Timeout.to_string()));
+        assert_eq!(yubikey_add(&s.state, "Blue", Some("pw"), &no_emit), Err(DeviceError::Timeout.to_string()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         *s.key.next.lock().unwrap() = Some(DeviceError::Timeout);
         assert!(set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), None, &no_emit).is_err());
@@ -542,7 +625,7 @@ mod tests {
     fn unlock_methods_while_locked_has_no_secrets() {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
         fingerprint_enable(&s.state).unwrap();
         commands::lock(&s.state);
         let m = unlock_methods(&s.state).unwrap();
@@ -560,6 +643,7 @@ mod tests {
     fn change_password_two_factor_touches_each_key() {
         let s = setup();
         set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        *s.key.device.lock().unwrap() = 1;
         yubikey_add(&s.state, "Red", Some("pw"), &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
         assert_eq!(change_password(&s.state, "bad", "new", &no_emit), Err("Wrong password".into()));
@@ -594,6 +678,17 @@ mod tests {
     }
 
     #[test]
+    fn begin_counts_as_activity() {
+        let s = setup();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        s.state.last_activity.lock().unwrap().1 = old;
+        let limit = std::time::Duration::from_secs(300);
+        assert!(s.state.idle_expired(limit));
+        let _ops = commands::begin(&s.state).unwrap();
+        assert!(!s.state.idle_expired(limit));
+    }
+
+    #[test]
     fn locked_vault_refuses_changes() {
         let s = setup();
         commands::lock(&s.state);
@@ -622,9 +717,9 @@ mod tests {
         fn available(&self) -> bool {
             true
         }
-        fn enroll(&self) -> Result<Enrolled, DeviceError> {
+        fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
             self.check();
-            self.inner.enroll()
+            self.inner.enroll(exclude)
         }
         fn assert(&self, allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
             self.check();
@@ -642,6 +737,7 @@ mod tests {
         key.state.set(Arc::downgrade(&state)).unwrap();
         *state.vault.lock().unwrap() = Some(v);
         set_mode(&state, Mode::PasswordYubikey, Some("pw"), None, &no_emit).unwrap();
+        *key.inner.device.lock().unwrap() = 1;
         yubikey_add(&state, "Red", Some("pw"), &no_emit).unwrap();
         change_password(&state, "pw", "new", &no_emit).unwrap();
         commands::lock(&state);

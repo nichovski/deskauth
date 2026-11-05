@@ -71,7 +71,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
             <p class="dim" id="no-yubikey" hidden>${NO_YUBIKEY}</p>
             <form id="add-form" class="stack">
               <input id="add-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" />
-              <input id="add-pw" type="password" placeholder="Current password" autocomplete="current-password" hidden />
+              <input id="add-pw" type="password" placeholder="Current password" autocomplete="current-password" />
               <div class="actions"><button type="submit">Add YubiKey</button></div>
             </form>
           </div>
@@ -225,7 +225,6 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     showKeys(info);
     noYubikey.hidden = info.can_yubikey;
     addForm.hidden = !info.can_yubikey;
-    addPw.hidden = !twoFactor;
 
     fingerSection.hidden = info.mode !== "any";
     // A set-up fingerprint can be turned off even when the reader is gone.
@@ -281,14 +280,13 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   addForm.addEventListener("submit", (e) => {
     e.preventDefault();
     if (!m) return;
-    const twoFactor = m.mode === "password_yubikey";
-    if (twoFactor && !addPw.value) {
+    if (!addPw.value) {
       mErr.textContent = "Type your password to continue";
       addPw.focus();
       return;
     }
     const name = addName.value;
-    const password = twoFactor ? addPw.value : null;
+    const password = addPw.value;
     change(() => yubikeyAdd(name, password), "YubiKey added");
   });
 

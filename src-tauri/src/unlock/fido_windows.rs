@@ -15,6 +15,7 @@ const RP_ID: &str = "deskauth";
 #[cfg(windows)]
 const TIMEOUT_MS: u32 = 30_000;
 
+const NTE_EXISTS: i32 = 0x8009_000F_u32 as i32;
 const NTE_NOT_FOUND: i32 = 0x8009_0011_u32 as i32;
 const NTE_DEVICE_NOT_FOUND: i32 = 0x8009_0035_u32 as i32;
 const NTE_USER_CANCELLED: i32 = 0x8009_0036_u32 as i32;
@@ -30,6 +31,7 @@ fn hresult_error(code: i32) -> DeviceError {
     match code {
         NTE_USER_CANCELLED => DeviceError::Cancelled,
         NTE_NOT_FOUND => DeviceError::NoCredential,
+        NTE_EXISTS => DeviceError::AlreadyRegistered,
         NTE_DEVICE_NOT_FOUND => DeviceError::NoDevice,
         HRESULT_TIMEOUT => DeviceError::Timeout,
         _ => DeviceError::Other(format!("Security key error: 0x{:08X}.", code as u32)),
@@ -194,7 +196,8 @@ mod imp {
     }
 
     /// Creates a non-resident credential with hmac-secret on a roaming key, user presence only.
-    fn make_credential() -> Result<Vec<u8>, DeviceError> {
+    /// A key holding one of `exclude` refuses.
+    fn make_credential(exclude: &[Vec<u8>]) -> Result<Vec<u8>, DeviceError> {
         let rp = WEBAUTHN_RP_ENTITY_INFORMATION {
             dwVersion: WEBAUTHN_RP_ENTITY_INFORMATION_CURRENT_VERSION,
             pwszId: w!("deskauth"),
@@ -219,6 +222,16 @@ mod imp {
             cCredentialParameters: algs.len() as u32,
             pCredentialParameters: algs.as_mut_ptr(),
         };
+        let mut exclude_ids: Vec<Vec<u8>> = exclude.to_vec();
+        let mut excluded: Vec<WEBAUTHN_CREDENTIAL> = exclude_ids
+            .iter_mut()
+            .map(|id| WEBAUTHN_CREDENTIAL {
+                dwVersion: WEBAUTHN_CREDENTIAL_CURRENT_VERSION,
+                cbId: id.len() as u32,
+                pbId: id.as_mut_ptr(),
+                pwszCredentialType: WEBAUTHN_CREDENTIAL_TYPE_PUBLIC_KEY,
+            })
+            .collect();
         let mut client = ClientData::new("webauthn.create");
         let client_data = client.raw();
         let mut enable = BOOL::from(true);
@@ -230,6 +243,15 @@ mod imp {
         let options = WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS {
             dwVersion: WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_1,
             dwTimeoutMilliseconds: TIMEOUT_MS,
+            // In options version 1 this is the exclude list.
+            CredentialList: WEBAUTHN_CREDENTIALS {
+                cCredentials: excluded.len() as u32,
+                pCredentials: if excluded.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    excluded.as_mut_ptr()
+                },
+            },
             Extensions: WEBAUTHN_EXTENSIONS {
                 cExtensions: extensions.len() as u32,
                 pExtensions: extensions.as_mut_ptr(),
@@ -369,8 +391,8 @@ mod imp {
             supports_hmac_salts(unsafe { WebAuthNGetApiVersionNumber() })
         }
 
-        fn enroll(&self) -> Result<Enrolled, DeviceError> {
-            let credential_id = make_credential()?;
+        fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+            let credential_id = make_credential(exclude)?;
             let salt = random::<32>();
             let (_, hmac) = get_assertion(&[(credential_id.clone(), salt)])?;
             Ok(Enrolled {
@@ -410,6 +432,7 @@ mod tests {
         assert_eq!(hresult_error(NTE_NOT_FOUND), DeviceError::NoCredential);
         assert_eq!(hresult_error(HRESULT_TIMEOUT), DeviceError::Timeout);
         assert_eq!(hresult_error(NTE_DEVICE_NOT_FOUND), DeviceError::NoDevice);
+        assert_eq!(hresult_error(NTE_EXISTS), DeviceError::AlreadyRegistered);
         assert_eq!(
             hresult_error(0x8009_0027_u32 as i32),
             DeviceError::Other("Security key error: 0x80090027.".into())

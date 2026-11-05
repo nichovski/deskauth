@@ -33,6 +33,8 @@ fn lib_cfg() -> LibCfg {
 fn map_error(msg: &str) -> DeviceError {
     if msg.contains("CTAP2_ERR_NO_CREDENTIALS") {
         DeviceError::NoCredential
+    } else if msg.contains("CTAP2_ERR_CREDENTIAL_EXCLUDED") {
+        DeviceError::AlreadyRegistered
     } else if msg.contains("CTAP2_ERR_USER_ACTION_TIMEOUT")
         || msg.contains("CTAP2_ERR_ACTION_TIMEOUT")
     {
@@ -191,12 +193,14 @@ fn hmac(
 }
 
 impl HmacKey for HidKey {
+    /// HID access is always there; a missing key is reported when it is used.
     fn available(&self) -> bool {
-        !get_fidokey_devices().is_empty()
+        true
     }
 
-    /// Uses the first FIDO device found when several are plugged in.
-    fn enroll(&self) -> Result<Enrolled, DeviceError> {
+    /// Uses the first FIDO device found when several are plugged in. `exclude` is sent as the
+    /// excludeList, so a key that is already registered refuses.
+    fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
         let param = get_fidokey_devices()
             .into_iter()
             .next()
@@ -207,11 +211,14 @@ impl HmacKey for HidKey {
         let user_id = random::<32>();
         let user =
             PublicKeyCredentialUserEntity::new(Some(&user_id), Some("deskauth"), Some("Deskauth"));
-        let args = MakeCredentialArgsBuilder::new(RP_ID, &challenge)
+        let mut builder = MakeCredentialArgsBuilder::new(RP_ID, &challenge)
             .without_pin_and_uv()
             .user_entity(&user)
-            .extensions(&[MakeExt::HmacSecret(Some(true))])
-            .build();
+            .extensions(&[MakeExt::HmacSecret(Some(true))]);
+        for id in exclude {
+            builder = builder.exclude_authenticator(id);
+        }
+        let args = builder.build();
         let att = dev
             .make_credential_with_args(&args)
             .map_err(|e| map_error(&e.to_string()))?;
@@ -283,6 +290,12 @@ mod tests {
                 "response_status err = 0x2D CTAP2_ERR_KEEPALIVE_CANCEL  Pending keep alive was cancelled."
             ),
             DeviceError::Cancelled
+        );
+        assert_eq!(
+            e(
+                "response_status err = 0x19 CTAP2_ERR_CREDENTIAL_EXCLUDED   Valid credential found in the exclude list."
+            ),
+            DeviceError::AlreadyRegistered
         );
         assert_eq!(e("FIDO device not found."), DeviceError::NoDevice);
     }

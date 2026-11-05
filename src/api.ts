@@ -91,7 +91,7 @@ export const vaultUnlockYubikey = () => invoke<void>("vault_unlock_yubikey");
 export const vaultUnlockFingerprint = () => invoke<void>("vault_unlock_fingerprint");
 export const vaultUnlockTwoFactor = (password: string) =>
   invoke<void>("vault_unlock_two_factor", { password });
-export const yubikeyAdd = (name: string, password: string | null) =>
+export const yubikeyAdd = (name: string, password: string) =>
   invoke<void>("yubikey_add", { name, password });
 export const yubikeyRemove = (id: string) => invoke<void>("yubikey_remove", { id });
 export const fingerprintEnable = () => invoke<void>("fingerprint_enable");
