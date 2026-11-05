@@ -69,15 +69,59 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
   let waitUnplug = false;
   let sawNoMatch = false;
   let autoRestart = false;
+  // Touch ID and Windows Hello start on their own only once.
+  let fingerTried = false;
+  let useFinger = false;
+  let autoKey = false;
+  // The reader and the key are only used while this window is focused and visible: fprintd
+  // allows one user of the reader, and an open key request gets in the way of the browser.
+  let active = false;
   let pollTimer = 0;
   let restartTimer = 0;
 
-  /** Leaves the screen once, whichever unlock got there first. */
-  function finish() {
+  function stopTimers() {
+    window.clearInterval(pollTimer);
+    window.clearTimeout(restartTimer);
+    pollTimer = restartTimer = 0;
+  }
+
+  /** Leaves the screen once, whichever unlock got there first, after `delay` ms. */
+  function finish(delay = 0) {
     if (finished || disposed) return;
     finished = true;
-    done();
+    stopTimers();
+    window.setTimeout(() => {
+      if (!disposed) done();
+    }, delay);
   }
+
+  function start() {
+    if (disposed || finished) return;
+    if (useFinger) autoScan();
+    if (autoKey && !pollTimer) {
+      pollTimer = window.setInterval(pollKey, KEY_POLL_MS);
+      pollKey();
+    }
+  }
+
+  /** A YubiKey call already running cannot be stopped; no new one starts. */
+  function stop() {
+    stopTimers();
+    if (useFinger) unlockCancel().catch(() => {});
+  }
+
+  const isActive = () => document.visibilityState === "visible" && document.hasFocus();
+
+  function onFocusChange() {
+    const now = isActive();
+    if (now === active) return;
+    active = now;
+    if (active) start();
+    else stop();
+  }
+  window.addEventListener("focus", onFocusChange);
+  window.addEventListener("blur", onFocusChange);
+  document.addEventListener("visibilitychange", onFocusChange);
 
   // A failed read (for example a damaged file) leaves the plain password form; unlocking then
   // reports the problem.
@@ -90,28 +134,35 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       return;
     }
     const any = m.mode === "any";
-    const useFinger = any && m.can_fingerprint && m.fingerprint;
+    useFinger = any && m.can_fingerprint && m.fingerprint;
     const hasKeys = any && m.can_yubikey && m.yubikeys.length > 0;
-    const autoKey = hasKeys && m.auto_yubikey;
+    autoKey = hasKeys && m.auto_yubikey;
     hint.textContent = listenHint(useFinger, autoKey);
     hint.hidden = hint.textContent === "";
     // Windows shows its own dialog for a key, so it only starts on a click.
     yubikey.hidden = !(hasKeys && !m.auto_yubikey);
     if (useFinger) {
-      // Touch ID and Windows Hello own their dialog; only fprintd is restarted on its own.
+      // Touch ID and Windows Hello own their dialog (which takes the focus); only fprintd is
+      // restarted on its own.
       autoRestart = m.platform === "linux";
       finger.hidden = false;
-      scanFinger();
     }
-    if (autoKey) {
-      pollTimer = window.setInterval(pollKey, KEY_POLL_MS);
-      pollKey();
-    }
+    // Waits for the focus when the window starts in the background. Focus changes before this
+    // point only set `active`, since nothing was set up to start.
+    active = isActive();
+    if (active) start();
   });
+
+  /** Starts a scan by itself only while focused, and on macOS and Windows only once. */
+  function autoScan() {
+    if (active && (autoRestart || !fingerTried)) scanFinger();
+    else if (!fingerBusy) setFingerState(finger, "idle");
+  }
 
   async function scanFinger() {
     if (disposed || finished || fingerBusy) return;
     fingerBusy = true;
+    fingerTried = true;
     sawNoMatch = false;
     fingerAgain.hidden = true;
     setFingerState(finger, "scanning");
@@ -120,7 +171,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       await vaultUnlockFingerprint();
       fingerBusy = false;
       setFingerState(finger, "match");
-      window.setTimeout(finish, MATCH_SHOW_MS);
+      finish(MATCH_SHOW_MS);
       return;
     } catch (e) {
       fingerBusy = false;
@@ -136,11 +187,15 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       if (!expected) setFingerLine(finger, msg, true);
       fingerAgain.hidden = false;
     } else if (sawNoMatch) {
-      restartTimer = window.setTimeout(scanFinger, FINGER_RESTART_MS);
+      restartTimer = window.setTimeout(autoScan, FINGER_RESTART_MS);
     } else if (msg === TIMED_OUT) {
-      scanFinger();
+      autoScan();
+    } else if (active) {
+      // Cancelled while focused: a cancel meant for an earlier scan; start a fresh one.
+      restartTimer = window.setTimeout(autoScan, FINGER_RESTART_MS);
+    } else {
+      setFingerState(finger, "idle");
     }
-    // Cancelled on Linux: only this screen cancels, when it goes away.
   }
 
   const unlistenFinger = onFingerStatus((s) => {
@@ -166,14 +221,14 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
 
   /** Asks a plugged-in key for a touch; enumerating devices never needs one. */
   async function pollKey() {
-    if (disposed || finished || keyBusy) return;
+    if (disposed || finished || keyBusy || !active) return;
     let present: boolean;
     try {
       present = await yubikeyPresent();
     } catch {
       return;
     }
-    if (disposed || finished || keyBusy) return;
+    if (disposed || finished || keyBusy || !active) return;
     if (!present) {
       if (waitUnplug) showKeyLine("", false);
       waitUnplug = false;
@@ -190,7 +245,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       keyBusy = false;
       if (disposed || finished) return;
       const msg = String(e);
-      if (msg === TIMED_OUT || msg === NO_YUBIKEY_FOUND) {
+      if (msg === TIMED_OUT || msg === NO_YUBIKEY_FOUND || msg === CANCELLED) {
         showKeyLine("", false);
       } else {
         showKeyLine(msg, false, true);
@@ -255,8 +310,10 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
   });
   return () => {
     disposed = true;
-    window.clearInterval(pollTimer);
-    window.clearTimeout(restartTimer);
+    stopTimers();
+    window.removeEventListener("focus", onFocusChange);
+    window.removeEventListener("blur", onFocusChange);
+    document.removeEventListener("visibilitychange", onFocusChange);
     unlistenTouch.then((off) => off());
     unlistenFinger.then((off) => off());
     unlockCancel().catch(() => {});

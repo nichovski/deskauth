@@ -84,6 +84,14 @@ fn set_unlocked(state: &AppState, v: Vault) {
     state.touch();
 }
 
+/// A device unlock that would only be dropped is not started.
+fn already_unlocked(state: &AppState) -> Result<(), String> {
+    if state.vault.lock().unwrap().is_some() {
+        return Err(DeviceError::Cancelled.to_string());
+    }
+    Ok(())
+}
+
 /// An empty field means no PIN.
 fn some_pin(pin: Option<&str>) -> Option<&str> {
     pin.filter(|p| !p.is_empty())
@@ -135,6 +143,7 @@ pub fn unlock_methods(state: &AppState) -> Result<UnlockMethods, String> {
 }
 
 pub fn unlock_yubikey(state: &AppState, emit: Emit) -> Result<(), String> {
+    already_unlocked(state)?;
     let info = vault::read_info(&state.vault_path).map_err(vault_err)?;
     if info.mode != Mode::Any {
         return Err(not_enabled("YubiKey-only unlock"));
@@ -163,6 +172,9 @@ pub fn unlock_fingerprint(state: &AppState, on_status: OnStatus) -> Result<(), S
         _ => return Err(not_enabled("Fingerprint unlock")),
     };
     state.finger_cancel.store(false, Ordering::SeqCst);
+    // Checked after clearing the flag: an unlock that lands before this check is seen here,
+    // one after it sets the flag again and stops the scan.
+    already_unlocked(state)?;
     let secret = state.fingerprint.unlock(&id, &state.finger_cancel, on_status).map_err(device_err)?;
     let v = vault::unlock_with(&state.vault_path, Secret::Fingerprint { secret: &secret }).map_err(vault_err)?;
     set_unlocked(state, v);
@@ -872,13 +884,36 @@ mod tests {
         yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         fingerprint_enable(&s.state, &quiet).unwrap();
         commands::lock(&s.state);
-        unlock_password(&s.state, "pw").unwrap();
-        // Marks the vault in memory only, to tell it from a fresh copy.
-        s.state.vault.lock().unwrap().as_mut().unwrap().accounts.clear();
-        unlock_fingerprint(&s.state, &quiet).unwrap();
-        unlock_yubikey(&s.state, &no_emit).unwrap();
+        // The password wins while each device call runs; the vault is marked in memory only,
+        // to tell it from a fresh copy.
+        let unlock_first = || {
+            commands::lock(&s.state);
+            unlock_password(&s.state, "pw").unwrap();
+            s.state.vault.lock().unwrap().as_mut().unwrap().accounts.clear();
+        };
+        *s.finger.statuses.lock().unwrap() = vec![FingerStatus::Scanning];
+        unlock_fingerprint(&s.state, &|_| unlock_first()).unwrap();
+        assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
+        commands::lock(&s.state);
+        unlock_yubikey(&s.state, &|_| unlock_first()).unwrap();
+        assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
         unlock_password(&s.state, "pw").unwrap();
         assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn device_unlock_on_an_unlocked_vault_is_not_started() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        *s.finger.statuses.lock().unwrap() = vec![FingerStatus::Scanning];
+        let scanned = Cell::new(false);
+        assert_eq!(unlock_fingerprint(&s.state, &|_| scanned.set(true)), Err(CANCELLED.into()));
+        assert!(!scanned.get());
+        let touched = Cell::new(false);
+        assert_eq!(unlock_yubikey(&s.state, &|_| touched.set(true)), Err(CANCELLED.into()));
+        assert!(!touched.get());
     }
 
     #[test]

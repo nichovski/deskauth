@@ -29,6 +29,8 @@ pub enum DeviceError {
     PinRequired,
     WrongPin,
     PinBlocked,
+    /// A PIN was given for a key that has none.
+    NoPin,
     Timeout,
     Cancelled,
     NotSetUp,
@@ -49,6 +51,9 @@ impl fmt::Display for DeviceError {
                 write!(f, "This YubiKey has a PIN. Enter it to register the key.")
             }
             DeviceError::WrongPin => write!(f, "Wrong YubiKey PIN."),
+            DeviceError::NoPin => {
+                write!(f, "This YubiKey has no PIN. Leave the PIN field empty.")
+            }
             DeviceError::PinBlocked => write!(
                 f,
                 "This YubiKey's PIN is blocked. Unplug it and try again, or reset it with the YubiKey Manager."
@@ -452,8 +457,24 @@ mod tests {
         );
         assert_eq!(DeviceError::WrongPin.to_string(), "Wrong YubiKey PIN.");
         assert_eq!(
+            DeviceError::NoPin.to_string(),
+            "This YubiKey has no PIN. Leave the PIN field empty."
+        );
+        assert_eq!(
             DeviceError::PinBlocked.to_string(),
             "This YubiKey's PIN is blocked. Unplug it and try again, or reset it with the YubiKey Manager."
+        );
+    }
+
+    /// `src/api.ts` (CANCELLED, TIMED_OUT, NO_YUBIKEY_FOUND) matches on these exact texts; the
+    /// lock screen breaks if they drift.
+    #[test]
+    fn texts_the_ui_matches_on() {
+        assert_eq!(DeviceError::Timeout.to_string(), "Timed out waiting. Try again.");
+        assert_eq!(DeviceError::Cancelled.to_string(), "Cancelled.");
+        assert_eq!(
+            DeviceError::NoDevice.to_string(),
+            "No YubiKey found. Plug it in and try again."
         );
     }
 

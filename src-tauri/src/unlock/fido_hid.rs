@@ -45,6 +45,8 @@ fn map_error(msg: &str) -> DeviceError {
         DeviceError::NoDevice
     } else if msg.contains("CTAP2_ERR_PIN_INVALID") {
         DeviceError::WrongPin
+    } else if msg.contains("CTAP2_ERR_PIN_NOT_SET") {
+        DeviceError::NoPin
     } else if msg.contains("CTAP2_ERR_PIN_BLOCKED") || msg.contains("CTAP2_ERR_PIN_AUTH_BLOCKED") {
         DeviceError::PinBlocked
     } else if [
@@ -67,6 +69,17 @@ fn map_error(msg: &str) -> DeviceError {
             .find(|w| w.starts_with("CTAP"))
             .unwrap_or(msg.trim());
         key_error(short)
+    }
+}
+
+/// Errors of a makeCredential that carried a PIN: a rejected pinUvAuthParam then means the PIN
+/// was not accepted, not that one is missing.
+fn map_enroll_error(msg: &str, pin_given: bool) -> DeviceError {
+    match map_error(msg) {
+        DeviceError::PinRequired if pin_given && msg.contains("CTAP2_ERR_PIN_AUTH_INVALID") => {
+            DeviceError::WrongPin
+        }
+        e => e,
     }
 }
 
@@ -232,7 +245,7 @@ impl HmacKey for HidKey {
         let args = builder.build();
         let att = dev
             .make_credential_with_args(&args)
-            .map_err(|e| map_error(&e.to_string()))?;
+            .map_err(|e| map_enroll_error(&e.to_string(), pin.is_some()))?;
         if !has_hmac_secret(&att.extensions) {
             return Err(no_hmac_secret());
         }
@@ -325,12 +338,27 @@ mod tests {
             map_error("response_status err = 0x31 CTAP2_ERR_PIN_INVALID   PIN Invalid."),
             DeviceError::WrongPin
         );
+        assert_eq!(
+            map_error("response_status err = 0x35 CTAP2_ERR_PIN_NOT_SET No PIN has been set."),
+            DeviceError::NoPin
+        );
         for msg in [
             "response_status err = 0x32 CTAP2_ERR_PIN_BLOCKED PIN Blocked.",
             "response_status err = 0x34 CTAP2_ERR_PIN_AUTH_BLOCKED PIN authentication, pinAuth, blocked.Requires power recycle to reset.",
         ] {
             assert_eq!(map_error(msg), DeviceError::PinBlocked, "{msg}");
         }
+    }
+
+    #[test]
+    fn rejected_pin_auth_with_a_pin_is_a_wrong_pin() {
+        let auth = "response_status err = 0x33 CTAP2_ERR_PIN_AUTH_INVALID PIN authentication, pinAuth, verification failed.";
+        assert_eq!(map_enroll_error(auth, true), DeviceError::WrongPin);
+        assert_eq!(map_enroll_error(auth, false), DeviceError::PinRequired);
+        let required = "response_status err = 0x36 CTAP2_ERR_PIN_REQUIRED  PIN is required for the selected operation.";
+        assert_eq!(map_enroll_error(required, true), DeviceError::PinRequired);
+        let wrong = "response_status err = 0x31 CTAP2_ERR_PIN_INVALID   PIN Invalid.";
+        assert_eq!(map_enroll_error(wrong, false), DeviceError::WrongPin);
     }
 
     #[test]
