@@ -246,7 +246,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       return;
     } catch (e) {
       keyBusy = false;
-      showPrompt(keyPrompt, "");
+      if (!busy) showPrompt(keyPrompt, "");
       if (disposed || finished) return;
       const msg = String(e);
       if (msg === TIMED_OUT || msg === NO_YUBIKEY_FOUND || msg === CANCELLED) {
@@ -283,7 +283,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
     }
     busy = false;
     status.textContent = "";
-    showPrompt(keyPrompt, "");
+    if (!keyBusy) showPrompt(keyPrompt, "");
     for (const b of buttons) b.disabled = false;
   }
 
