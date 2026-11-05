@@ -598,10 +598,35 @@ h2 {
   text-align: center;
 }
 
-.key-line.glow {
-  color: var(--accent);
-  text-shadow: 0 0 8px var(--accent);
-  animation: key-glow 1.6s ease-in-out infinite;
+/* Touch prompt: large line below the button that started the device call, with a pulsing key. */
+.prompt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--fg-bright);
+}
+
+.prompt[hidden] {
+  display: none;
+}
+
+.prompt-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  animation: prompt-pulse 1.6s ease-in-out infinite;
+}
+
+.prompt.no-icon .prompt-icon {
+  display: none;
 }
 
 @keyframes finger-pulse {
@@ -640,9 +665,15 @@ h2 {
   }
 }
 
-@keyframes key-glow {
+@keyframes prompt-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
   50% {
-    opacity: 0.6;
+    opacity: 1;
+    transform: scale(1.12);
   }
 }
 
@@ -650,7 +681,7 @@ h2 {
 @media (prefers-reduced-motion: reduce) {
   .finger[data-state] svg,
   .finger[data-state] .scan,
-  .key-line.glow {
+  .prompt-icon {
     animation: none;
   }
 

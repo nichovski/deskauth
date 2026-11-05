@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { confirmDialog } from "./confirm";
 import { fingerprintHtml, setFingerLine, setFingerState } from "./fingerprint";
+import { promptHtml, showPrompt, touchText } from "./prompt";
 
 const DAMAGED_PREFIX = "Vault file is damaged";
 const KEY_POLL_MS = 2000;
@@ -38,7 +39,8 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       ${fingerprintHtml("finger")}
       <p class="dim" id="hint" hidden></p>
       <input id="pw" type="password" placeholder="Password" autocomplete="current-password" autofocus />
-      <p class="dim key-line" id="key-line" hidden></p>
+      <p class="dim" id="key-line" hidden></p>
+      ${promptHtml("key-prompt")}
       <p class="dim" id="status"></p>
       <p class="error" id="err"></p>
       <button type="submit">Unlock</button>
@@ -51,6 +53,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
   const hint = root.querySelector<HTMLElement>("#hint")!;
   const pw = root.querySelector<HTMLInputElement>("#pw")!;
   const keyLine = root.querySelector<HTMLElement>("#key-line")!;
+  const keyPrompt = root.querySelector<HTMLElement>("#key-prompt")!;
   const status = root.querySelector<HTMLElement>("#status")!;
   const err = root.querySelector<HTMLElement>("#err")!;
   const reset = root.querySelector<HTMLButtonElement>("#reset")!;
@@ -211,10 +214,10 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
     }
   });
 
-  function showKeyLine(text: string, waiting: boolean, isError = false) {
+  /** The key line shows what went wrong with the last key attempt; the prompt shows the touch. */
+  function showKeyLine(text: string, isError = false) {
     keyLine.textContent = text;
     keyLine.hidden = text === "";
-    keyLine.classList.toggle("glow", waiting);
     keyLine.classList.toggle("error", isError);
     keyLine.classList.toggle("dim", !isError);
   }
@@ -230,7 +233,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
     }
     if (disposed || finished || keyBusy || !active) return;
     if (!present) {
-      if (waitUnplug) showKeyLine("", false);
+      if (waitUnplug) showKeyLine("");
       waitUnplug = false;
       return;
     }
@@ -243,22 +246,21 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
       return;
     } catch (e) {
       keyBusy = false;
+      showPrompt(keyPrompt, "");
       if (disposed || finished) return;
       const msg = String(e);
       if (msg === TIMED_OUT || msg === NO_YUBIKEY_FOUND || msg === CANCELLED) {
-        showKeyLine("", false);
+        showKeyLine("");
       } else {
-        showKeyLine(msg, false, true);
+        showKeyLine(msg, true);
         waitUnplug = true;
       }
     }
   }
 
   // Only shown while a device call runs, so a late event cannot leave a stale line.
-  const unlistenTouch = onTouchNeeded((name) => {
-    const text = name ? `Touch ${name}` : "Touch your YubiKey";
-    if (keyBusy) showKeyLine(text, true);
-    else if (busy) status.textContent = text;
+  const unlistenTouch = onTouchNeeded((t) => {
+    if (keyBusy || busy) showPrompt(keyPrompt, touchText(t));
   });
 
   /** Runs one unlock with every button disabled; a second one while it runs is ignored. */
@@ -281,6 +283,7 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
     }
     busy = false;
     status.textContent = "";
+    showPrompt(keyPrompt, "");
     for (const b of buttons) b.disabled = false;
   }
 

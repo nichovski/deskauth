@@ -8,7 +8,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{DeviceError, Enrolled, HmacKey};
+use super::{DeviceError, Enrolled, HmacKey, OnTouch};
 
 const RP_ID: &str = "deskauth";
 
@@ -220,7 +220,7 @@ impl HmacKey for HidKey {
     /// excludeList, so a key that is already registered refuses. With `pin`, makeCredential
     /// carries a pinUvAuthParam (keys whose firmware wants the PIN to register); the assertion
     /// after it stays touch only, like every unlock, so both get the same hmac output.
-    fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+    fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>, on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
         let param = get_fidokey_devices()
             .into_iter()
             .next()
@@ -243,6 +243,7 @@ impl HmacKey for HidKey {
             builder = builder.exclude_authenticator(id);
         }
         let args = builder.build();
+        on_touch(1, 2);
         let att = dev
             .make_credential_with_args(&args)
             .map_err(|e| map_enroll_error(&e.to_string(), pin.is_some()))?;
@@ -251,6 +252,7 @@ impl HmacKey for HidKey {
         }
         let credential_id = att.credential_descriptor.id;
         let salt = random::<32>();
+        on_touch(2, 2);
         let hmac = hmac(&dev, &credential_id, &salt)?;
         Ok(Enrolled {
             credential_id,

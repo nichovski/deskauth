@@ -94,7 +94,7 @@ mod imp {
         TIMEOUT_MS, check_answer, client_data_json, hmac_output, hresult_error, no_hmac_secret,
         supports_hmac_salts,
     };
-    use crate::unlock::{DeviceError, Enrolled, HmacKey};
+    use crate::unlock::{DeviceError, Enrolled, HmacKey, OnTouch};
 
     pub struct WebAuthnKey;
 
@@ -397,9 +397,11 @@ mod imp {
         }
 
         /// Windows asks for the PIN itself when the key has one.
-        fn enroll(&self, exclude: &[Vec<u8>], _pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+        fn enroll(&self, exclude: &[Vec<u8>], _pin: Option<&str>, on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
+            on_touch(1, 2);
             let credential_id = make_credential(exclude)?;
             let salt = random::<32>();
+            on_touch(2, 2);
             let (_, hmac) = get_assertion(&[(credential_id.clone(), salt)])?;
             Ok(Enrolled {
                 credential_id,

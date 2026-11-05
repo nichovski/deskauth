@@ -121,6 +121,11 @@ export const onCameraFrame = (cb: (f: CameraFrame) => void): Promise<UnlistenFn>
 /** Fired while a fingerprint scan runs. */
 export const onFingerStatus = (cb: (s: FingerStatus) => void): Promise<UnlistenFn> =>
   listen<FingerStatus>("finger-status", (e) => cb(e.payload));
-/** Fired before each YubiKey touch; `name` is the key to touch, or null for any registered key. */
-export const onTouchNeeded = (cb: (name: string | null) => void): Promise<UnlistenFn> =>
-  listen<{ name: string | null }>("touch-needed", (e) => cb(e.payload.name));
+/**
+ * Payload of "touch-needed": `name` is the key to touch, or null when any registered key will
+ * do or a new key is being added; this is touch `step` of `of` for the current call.
+ */
+export type TouchNeeded = { name: string | null; step: number; of: number };
+/** Fired before each YubiKey touch. */
+export const onTouchNeeded = (cb: (t: TouchNeeded) => void): Promise<UnlistenFn> =>
+  listen<TouchNeeded>("touch-needed", (e) => cb(e.payload));

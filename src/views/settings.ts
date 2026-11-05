@@ -14,6 +14,7 @@ import {
 import type { Go } from "../main";
 import { confirmDialog } from "./confirm";
 import { fingerprintHtml, setFingerLine, setFingerState } from "./fingerprint";
+import { promptHtml, showPrompt, touchText } from "./prompt";
 
 const MIN_LENGTH = 8;
 const DEFAULT_KEY_NAME = "YubiKey";
@@ -67,6 +68,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
             <input id="mode-name" placeholder="Name for the YubiKey" value="${DEFAULT_KEY_NAME}" hidden />
             <input id="mode-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" hidden />
             <div class="actions" id="mode-actions" hidden><button type="submit">Apply</button></div>
+            ${promptHtml("mode-prompt")}
           </form>
           <p class="warn" id="one-key" hidden>Only one YubiKey is registered. If you lose it, you lose this vault. Add a backup key.</p>
           <div id="keys-section" class="stack">
@@ -78,16 +80,17 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
               <input id="add-pw" type="password" placeholder="Current password" autocomplete="current-password" />
               <input id="add-pin" type="password" placeholder="${PIN_PLACEHOLDER}" autocomplete="off" />
               <div class="actions"><button type="submit">Add YubiKey</button></div>
+              ${promptHtml("add-prompt")}
             </form>
           </div>
           <div id="finger-section" class="stack">
             <h2>Fingerprint</h2>
             <label class="switch" id="finger-label"><input type="checkbox" id="finger" /> Unlock with fingerprint</label>
+            ${promptHtml("finger-prompt")}
             ${fingerprintHtml("finger-scan")}
             <p class="dim" id="finger-note" hidden>Any program running as you can read the keyring item while you are logged in, so on Linux the fingerprint is convenience, not extra security.</p>
             <p class="dim" id="no-finger" hidden>No fingerprint reader found.</p>
           </div>
-          <p class="dim" id="m-status"></p>
           <p class="error" id="m-err"></p>
           <p class="ok" id="m-ok"></p>
         </fieldset>
@@ -98,13 +101,13 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
         <input id="pw" type="password" placeholder="New password" autocomplete="new-password" />
         <input id="pw2" type="password" placeholder="Confirm new password" autocomplete="new-password" />
         <p class="dim" id="touch-each" hidden>You will touch each registered YubiKey.</p>
-        <p class="dim" id="pw-status"></p>
         <p class="error" id="err"></p>
         <p class="ok" id="ok"></p>
         <div class="actions">
           <button type="button" id="back" class="ghost">Back</button>
           <button type="submit">Change password</button>
         </div>
+        ${promptHtml("pw-prompt")}
       </form>
     </div>`;
   const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
@@ -118,6 +121,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const modeName = $<HTMLInputElement>("#mode-name");
   const modePin = $<HTMLInputElement>("#mode-pin");
   const modeActions = $("#mode-actions");
+  const modePrompt = $("#mode-prompt");
   const oneKey = $("#one-key");
   const keysSection = $("#keys-section");
   const keys = $("#keys");
@@ -126,13 +130,14 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const addName = $<HTMLInputElement>("#add-name");
   const addPw = $<HTMLInputElement>("#add-pw");
   const addPin = $<HTMLInputElement>("#add-pin");
+  const addPrompt = $("#add-prompt");
   const fingerSection = $("#finger-section");
   const fingerLabel = $("#finger-label");
   const finger = $<HTMLInputElement>("#finger");
+  const fingerPrompt = $("#finger-prompt");
   const fingerScan = $("#finger-scan");
   const fingerNote = $("#finger-note");
   const noFinger = $("#no-finger");
-  const mStatus = $("#m-status");
   const mErr = $("#m-err");
   const mOk = $("#m-ok");
 
@@ -142,17 +147,17 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const pw = $<HTMLInputElement>("#pw");
   const pw2 = $<HTMLInputElement>("#pw2");
   const touchEach = $("#touch-each");
-  const pwStatus = $("#pw-status");
+  const pwPrompt = $("#pw-prompt");
   const err = $("#err");
   const ok = $("#ok");
   const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
 
   let m: UnlockMethods | null = null;
   let busy = false;
-  // The status line of the device call that is running, if any.
-  let activeStatus: HTMLElement | null = null;
-  const unlisten = onTouchNeeded((name) => {
-    if (activeStatus) activeStatus.textContent = name ? `Touch ${name}` : "Touch your YubiKey";
+  // The prompt below the button of the device call that is running, if any.
+  let activePrompt: HTMLElement | null = null;
+  const unlisten = onTouchNeeded((t) => {
+    if (activePrompt) showPrompt(activePrompt, touchText(t));
   });
   // Only while enabling the fingerprint, when the icon is shown.
   const unlistenFinger = onFingerStatus((s) => {
@@ -165,17 +170,20 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     }
   });
 
-  /** Runs one vault change with both cards disabled and the touch status in `statusEl`. */
-  async function withDevice(statusEl: HTMLElement, work: () => Promise<void>, startText = "") {
+  /**
+   * Runs one vault change with both cards disabled and its touch prompt in `prompt`;
+   * `scanText` is shown (without the key icon) from the start.
+   */
+  async function withDevice(prompt: HTMLElement, work: () => Promise<void>, scanText = "") {
     busy = methods.disabled = submit.disabled = true;
-    activeStatus = statusEl;
-    statusEl.textContent = startText;
+    activePrompt = prompt;
+    showPrompt(prompt, scanText, false);
     try {
       await work();
     } finally {
       busy = methods.disabled = submit.disabled = false;
-      activeStatus = null;
-      statusEl.textContent = "";
+      activePrompt = null;
+      showPrompt(prompt, "");
     }
   }
 
@@ -219,7 +227,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
             `Remove the YubiKey "${key.name}"? It will no longer unlock this vault.`,
             "Remove",
           );
-          if (yes) change(() => yubikeyRemove(key.id), "YubiKey removed");
+          if (yes) change(() => yubikeyRemove(key.id), "YubiKey removed", addPrompt);
         });
         li.append(remove);
       }
@@ -264,12 +272,12 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   }
 
   /** Runs one change of the unlock methods, then shows the new state. */
-  async function change(work: () => Promise<void>, okText: string, startText = "") {
+  async function change(work: () => Promise<void>, okText: string, prompt: HTMLElement, scanText = "") {
     mErr.textContent = "";
     mOk.textContent = "";
     const focused = document.activeElement;
     try {
-      await withDevice(mStatus, work, startText);
+      await withDevice(prompt, work, scanText);
       mOk.textContent = okText;
       modePw.value = addPw.value = modePin.value = addPin.value = "";
     } catch (e) {
@@ -294,7 +302,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     const password = needsPassword ? modePw.value : null;
     const name = to === "password_yubikey" ? modeName.value : null;
     const pin = to === "password_yubikey" && modePin.value ? modePin.value : null;
-    change(() => setMode(to, password, name, pin), "Unlock method changed");
+    change(() => setMode(to, password, name, pin), "Unlock method changed", modePrompt);
   });
 
   addForm.addEventListener("submit", (e) => {
@@ -308,18 +316,18 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     const name = addName.value;
     const password = addPw.value;
     const pin = addPin.value || null;
-    change(() => yubikeyAdd(name, password, pin), "YubiKey added");
+    change(() => yubikeyAdd(name, password, pin), "YubiKey added", addPrompt);
   });
 
   finger.addEventListener("change", () => {
     if (!finger.checked) {
-      change(fingerprintDisable, "Fingerprint unlock is off");
+      change(fingerprintDisable, "Fingerprint unlock is off", fingerPrompt);
       return;
     }
     setFingerState(fingerScan, "scanning");
     setFingerLine(fingerScan, "");
     fingerScan.hidden = false;
-    change(fingerprintEnable, "Fingerprint unlock is on", "Scan your finger").finally(() => {
+    change(fingerprintEnable, "Fingerprint unlock is on", fingerPrompt, "Scan your finger").finally(() => {
       fingerScan.hidden = true;
     });
   });
@@ -346,7 +354,7 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
       return;
     }
     try {
-      await withDevice(pwStatus, () => vaultChangePassword(current.value, pw.value));
+      await withDevice(pwPrompt, () => vaultChangePassword(current.value, pw.value));
       current.value = pw.value = pw2.value = "";
       ok.textContent = "Password changed";
     } catch (e) {

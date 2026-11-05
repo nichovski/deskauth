@@ -90,6 +90,9 @@ pub enum FingerStatus {
 
 pub type OnStatus<'a> = &'a dyn Fn(FingerStatus);
 
+/// Called with (step, of) right before each device call that waits for a touch.
+pub type OnTouch<'a> = &'a dyn Fn(u8, u8);
+
 /// A FIDO2 key with the hmac-secret extension. Calls block until touch, so run them off the UI thread.
 pub trait HmacKey: Send + Sync {
     fn available(&self) -> bool;
@@ -98,8 +101,9 @@ pub trait HmacKey: Send + Sync {
     /// Creates a credential, picks a random salt and runs one assertion for its hmac
     /// (two touches on HID devices). A key that holds one of `exclude` is refused with
     /// `AlreadyRegistered`. `pin` is used for creating the credential only; every assertion is
-    /// touch only, so the hmac output stays the same on unlock.
-    fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError>;
+    /// touch only, so the hmac output stays the same on unlock. `on_touch` gets (1, 2) before
+    /// creating the credential and (2, 2) before the assertion.
+    fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>, on_touch: OnTouch) -> Result<Enrolled, DeviceError>;
     /// Returns the credential id that answered and its hmac output for that credential's salt.
     fn assert(
         &self,
@@ -139,7 +143,7 @@ impl HmacKey for Stub {
     fn present(&self) -> bool {
         false
     }
-    fn enroll(&self, _exclude: &[Vec<u8>], _pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+    fn enroll(&self, _exclude: &[Vec<u8>], _pin: Option<&str>, _on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
         Err(unsupported())
     }
     fn assert(
@@ -222,7 +226,7 @@ pub mod fake {
     use sha2::Sha256;
     use zeroize::Zeroizing;
 
-    use super::{DeviceError, Enrolled, FingerStatus, Fingerprint, HmacKey, OnStatus};
+    use super::{DeviceError, Enrolled, FingerStatus, Fingerprint, HmacKey, OnStatus, OnTouch};
 
     fn random<const N: usize>() -> [u8; N] {
         let mut b = [0u8; N];
@@ -267,8 +271,9 @@ pub mod fake {
             true
         }
 
-        fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+        fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>, on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
             self.pins.lock().unwrap().push(pin.map(str::to_owned));
+            on_touch(1, 2);
             take(&self.next)?;
             let device = *self.device.lock().unwrap();
             let mut creds = self.creds.lock().unwrap();
@@ -281,6 +286,7 @@ pub mod fake {
             let credential_id = random::<16>().to_vec();
             let secret = random::<32>();
             let salt = random::<32>();
+            on_touch(2, 2);
             let hmac = hmac_of(&secret, &salt);
             creds.push((credential_id.clone(), secret, device));
             Ok(Enrolled {
@@ -391,7 +397,7 @@ mod tests {
     #[test]
     fn fake_same_salt_same_hmac() {
         let key = FakeKey::default();
-        let e = key.enroll(&[], None).unwrap();
+        let e = key.enroll(&[], None, &|_, _| {}).unwrap();
         let (id, out) = key.assert(&[(e.credential_id.clone(), e.salt)]).unwrap();
         assert_eq!(id, e.credential_id);
         assert_eq!(*out, *e.hmac);
@@ -400,17 +406,17 @@ mod tests {
     #[test]
     fn fake_other_salt_differs() {
         let key = FakeKey::default();
-        let e = key.enroll(&[], None).unwrap();
+        let e = key.enroll(&[], None, &|_, _| {}).unwrap();
         let (_, out) = key.assert(&[(e.credential_id.clone(), [9u8; 32])]).unwrap();
         assert_ne!(*out, *e.hmac);
-        let other = FakeKey::default().enroll(&[], None).unwrap();
+        let other = FakeKey::default().enroll(&[], None, &|_, _| {}).unwrap();
         assert_ne!(*other.hmac, *e.hmac);
     }
 
     #[test]
     fn fake_assert_unknown_allow_list_is_no_credential() {
         let key = FakeKey::default();
-        key.enroll(&[], None).unwrap();
+        key.enroll(&[], None, &|_, _| {}).unwrap();
         let r = key.assert(&[(b"unknown".to_vec(), [1u8; 32])]);
         assert_eq!(r.err(), Some(DeviceError::NoCredential));
     }
@@ -419,17 +425,17 @@ mod tests {
     fn fake_queued_error_returned_once() {
         let key = FakeKey::default();
         *key.next.lock().unwrap() = Some(DeviceError::Timeout);
-        assert_eq!(key.enroll(&[], None).err(), Some(DeviceError::Timeout));
-        assert!(key.enroll(&[], None).is_ok());
+        assert_eq!(key.enroll(&[], None, &|_, _| {}).err(), Some(DeviceError::Timeout));
+        assert!(key.enroll(&[], None, &|_, _| {}).is_ok());
     }
 
     #[test]
     fn fake_enroll_refuses_excluded_credential_on_the_same_device() {
         let key = FakeKey::default();
-        let e = key.enroll(&[], None).unwrap();
+        let e = key.enroll(&[], None, &|_, _| {}).unwrap();
         let exclude = [e.credential_id.clone()];
         assert_eq!(
-            key.enroll(&exclude, None).err(),
+            key.enroll(&exclude, None, &|_, _| {}).err(),
             Some(DeviceError::AlreadyRegistered)
         );
         assert_eq!(
@@ -437,7 +443,7 @@ mod tests {
             "This YubiKey is already registered."
         );
         *key.device.lock().unwrap() = 1;
-        assert!(key.enroll(&exclude, None).is_ok());
+        assert!(key.enroll(&exclude, None, &|_, _| {}).is_ok());
     }
 
     #[test]
@@ -500,7 +506,7 @@ mod tests {
         // The stub directly: the platform functions may return real devices.
         assert!(!HmacKey::available(&Stub));
         assert!(!Stub.present());
-        assert!(matches!(Stub.enroll(&[], None), Err(DeviceError::Unsupported(_))));
+        assert!(matches!(Stub.enroll(&[], None, &|_, _| {}), Err(DeviceError::Unsupported(_))));
         assert!(!Fingerprint::available(&Stub));
         assert!(matches!(
             Stub.unlock("s1", &never(), &quiet),

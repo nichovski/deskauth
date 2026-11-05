@@ -15,8 +15,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use zeroize::Zeroizing;
 
-/// Called with the key name (None when any registered key will do) before every touch.
-pub type Emit<'a> = &'a dyn Fn(Option<&str>);
+/// Called before every touch with the key name and the step as (step, of). The name is None
+/// when any registered key will do, and while enrolling a new key (two steps).
+pub type Emit<'a> = &'a dyn Fn(Option<&str>, u8, u8);
 
 const PASSWORD_NEEDED: &str = "Type your password to continue";
 const DEFAULT_KEY_NAME: &str = "YubiKey";
@@ -106,7 +107,7 @@ fn assert_any(state: &AppState, keys: &[YubikeyInfo], emit: Emit) -> Result<(Vec
     if keys.is_empty() {
         return Err("No YubiKey is registered for this vault".into());
     }
-    emit(None);
+    emit(None, 1, 1);
     state.hmac_key.assert(&allowed(keys)).map_err(device_err)
 }
 
@@ -210,15 +211,13 @@ pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, pin: Op
             let password = password.ok_or(PASSWORD_NEEDED)?;
             // Verify against the file; the copy is dropped (and wiped) right away.
             vault::unlock(&state.vault_path, password).map_err(vault_err)?;
-            emit(Some(name));
-            let e = state.hmac_key.enroll(&registered, pin).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered, pin, &|step, of| emit(None, step, of)).map_err(device_err)?;
             with_vault(state, |v| v.add_yubikey(name, &e.credential_id, e.salt, &e.hmac))?;
         }
         Mode::PasswordYubikey => {
             let password = password.ok_or(PASSWORD_NEEDED)?;
             verify_two_factor(state, &info.yubikeys, password, emit)?;
-            emit(Some(name));
-            let e = state.hmac_key.enroll(&registered, pin).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered, pin, &|step, of| emit(None, step, of)).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             with_vault(state, |v| v.add_yubikey_two_factor(name, &e.credential_id, e.salt, kek))?;
         }
@@ -287,9 +286,8 @@ pub fn set_mode(
             let password = password.ok_or(PASSWORD_NEEDED)?;
             vault::unlock(&state.vault_path, password).map_err(vault_err)?;
             let name = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(DEFAULT_KEY_NAME);
-            emit(Some(name));
             // Every existing slot is replaced, so an already registered key may be used again.
-            let e = state.hmac_key.enroll(&[], pin).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&[], pin, &|step, of| emit(None, step, of)).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             let removed = with_vault(state, |v| v.to_two_factor_mode(name, &e.credential_id, e.salt, kek))?;
             disable_fingerprints(state, &removed);
@@ -321,8 +319,9 @@ pub fn change_password(state: &AppState, current: &str, new_password: &str, emit
         return with_vault(state, |v| v.set_password(kek));
     }
     let mut keks = Vec::with_capacity(info.yubikeys.len());
-    for key in &info.yubikeys {
-        emit(Some(&key.name));
+    let of = u8::try_from(info.yubikeys.len()).unwrap_or(u8::MAX);
+    for (k, key) in info.yubikeys.iter().enumerate() {
+        emit(Some(&key.name), u8::try_from(k + 1).unwrap_or(u8::MAX), of);
         let (credential_id, hmac) =
             state.hmac_key.assert(&[(key.credential_id.clone(), key.salt)]).map_err(device_err)?;
         if credential_id != key.credential_id {
@@ -347,6 +346,8 @@ pub fn yubikey_present(state: &AppState) -> bool {
 #[derive(Serialize, Clone)]
 struct TouchNeeded {
     name: Option<String>,
+    step: u8,
+    of: u8,
 }
 
 /// Payload of the "finger-status" event.
@@ -375,8 +376,8 @@ pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce(&AppState, Emit) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let emit = |name: Option<&str>| {
-            let _ = app.emit("touch-needed", TouchNeeded { name: name.map(str::to_owned) });
+        let emit = |name: Option<&str>, step: u8, of: u8| {
+            let _ = app.emit("touch-needed", TouchNeeded { name: name.map(str::to_owned), step, of });
         };
         work(&app.state::<AppState>(), &emit)
     })
@@ -389,7 +390,7 @@ mod tests {
     use crate::account::{Account, Algorithm};
     use crate::commands;
     use crate::unlock::fake::{FakeFinger, FakeKey};
-    use crate::unlock::{DeviceError, Enrolled, HmacKey};
+    use crate::unlock::{DeviceError, Enrolled, HmacKey, OnTouch};
     use crate::vault::{self, Secret};
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
@@ -429,7 +430,7 @@ mod tests {
         Setup { _dir: dir, path, state, key, finger }
     }
 
-    fn no_emit(_: Option<&str>) {}
+    fn no_emit(_: Option<&str>, _: u8, _: u8) {}
 
     fn quiet(_: FingerStatus) {}
 
@@ -453,9 +454,7 @@ mod tests {
     fn add_key_then_unlock_with_it() {
         let s = setup();
         set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
-        let names = std::cell::RefCell::new(Vec::new());
-        yubikey_add(&s.state, "Blue", Some("pw"), None, &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
-        assert_eq!(*names.borrow(), [Some("Blue".to_string())]);
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         commands::lock(&s.state);
         unlock_yubikey(&s.state, &no_emit).unwrap();
         assert_eq!(labels(&s.state.vault.lock().unwrap().as_ref().unwrap().accounts), ["Acme/me"]);
@@ -471,7 +470,7 @@ mod tests {
         commands::lock(&s.state);
         // A different key is plugged in.
         s.key.creds.lock().unwrap().clear();
-        s.key.enroll(&[], None).unwrap();
+        s.key.enroll(&[], None, &|_, _| {}).unwrap();
         assert_eq!(unlock_yubikey(&s.state, &no_emit), Err(NOT_REGISTERED.into()));
         assert!(!unlocked(&s.state));
     }
@@ -600,9 +599,9 @@ mod tests {
         // The backup key is plugged in next to Blue.
         *s.key.device.lock().unwrap() = 1;
         let count = Cell::new(0);
-        yubikey_add(&s.state, "Red", Some("pw"), None, &|_| count.set(count.get() + 1)).unwrap();
-        // One touch to prove the password with a registered key, one to enroll.
-        assert_eq!(count.get(), 2);
+        yubikey_add(&s.state, "Red", Some("pw"), None, &|_, _, _| count.set(count.get() + 1)).unwrap();
+        // One touch to prove the password with a registered key, two to enroll.
+        assert_eq!(count.get(), 3);
         assert!(unlock_with_key(&s.path, &s.key, 1, "pw").is_ok());
         assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 2);
     }
@@ -648,7 +647,7 @@ mod tests {
         fn present(&self) -> bool {
             true
         }
-        fn enroll(&self, _exclude: &[Vec<u8>], _pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+        fn enroll(&self, _exclude: &[Vec<u8>], _pin: Option<&str>, _on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
             Err(DeviceError::Other("not used".into()))
         }
         fn assert(&self, _allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
@@ -664,7 +663,7 @@ mod tests {
 
         // An unregistered key is plugged in instead of Blue.
         let blue = std::mem::take(&mut *s.key.creds.lock().unwrap());
-        s.key.enroll(&[], None).unwrap();
+        s.key.enroll(&[], None, &|_, _| {}).unwrap();
         for to in [Mode::Any, Mode::Password] {
             assert_eq!(set_mode(&s.state, to, Some("pw"), None, None, &no_emit), Err(NOT_REGISTERED.into()));
             assert_eq!(std::fs::read(&s.path).unwrap(), before);
@@ -727,13 +726,53 @@ mod tests {
         assert_eq!(change_password(&s.state, "bad", "new", &no_emit), Err("Wrong password".into()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
 
-        let names = std::cell::RefCell::new(Vec::new());
-        change_password(&s.state, "pw", "new", &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
-        assert_eq!(*names.borrow(), [Some("Blue".to_string()), Some("Red".to_string())]);
+        let touches = Recorder::default();
+        change_password(&s.state, "pw", "new", &|n, step, of| touches.push(n, step, of)).unwrap();
+        assert_eq!(touches.take(), [(Some("Blue".into()), 1, 2), (Some("Red".into()), 2, 2)]);
         for i in 0..2 {
             assert!(unlock_with_key(&s.path, &s.key, i, "new").is_ok());
             assert!(unlock_with_key(&s.path, &s.key, i, "pw").is_err());
         }
+    }
+
+    /// Records every touch-needed call.
+    #[derive(Default)]
+    struct Recorder(std::cell::RefCell<Vec<(Option<String>, u8, u8)>>);
+
+    impl Recorder {
+        fn push(&self, name: Option<&str>, step: u8, of: u8) {
+            self.0.borrow_mut().push((name.map(str::to_owned), step, of));
+        }
+        fn take(&self) -> Vec<(Option<String>, u8, u8)> {
+            self.0.take()
+        }
+    }
+
+    #[test]
+    fn yubikey_add_asks_for_two_touches() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        let touches = Recorder::default();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &|n, step, of| touches.push(n, step, of)).unwrap();
+        assert_eq!(touches.take(), [(None, 1, 2), (None, 2, 2)]);
+
+        // In two-factor mode a registered key proves the password first.
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Green"), None, &|n, step, of| touches.push(n, step, of)).unwrap();
+        assert_eq!(touches.take(), [(None, 1, 2), (None, 2, 2)]);
+        *s.key.device.lock().unwrap() = 1;
+        yubikey_add(&s.state, "Red", Some("pw"), None, &|n, step, of| touches.push(n, step, of)).unwrap();
+        assert_eq!(touches.take(), [(None, 1, 1), (None, 1, 2), (None, 2, 2)]);
+    }
+
+    #[test]
+    fn unlock_asks_for_one_touch() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
+        commands::lock(&s.state);
+        let touches = Recorder::default();
+        unlock_yubikey(&s.state, &|n, step, of| touches.push(n, step, of)).unwrap();
+        assert_eq!(touches.take(), [(None, 1, 1)]);
     }
 
     #[test]
@@ -798,9 +837,9 @@ mod tests {
         fn present(&self) -> bool {
             true
         }
-        fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError> {
+        fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>, on_touch: OnTouch) -> Result<Enrolled, DeviceError> {
             self.check();
-            self.inner.enroll(exclude, pin)
+            self.inner.enroll(exclude, pin, on_touch)
         }
         fn assert(&self, allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
             self.check();
@@ -895,7 +934,7 @@ mod tests {
         unlock_fingerprint(&s.state, &|_| unlock_first()).unwrap();
         assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
         commands::lock(&s.state);
-        unlock_yubikey(&s.state, &|_| unlock_first()).unwrap();
+        unlock_yubikey(&s.state, &|_, _, _| unlock_first()).unwrap();
         assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
         unlock_password(&s.state, "pw").unwrap();
         assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
@@ -912,7 +951,7 @@ mod tests {
         assert_eq!(unlock_fingerprint(&s.state, &|_| scanned.set(true)), Err(CANCELLED.into()));
         assert!(!scanned.get());
         let touched = Cell::new(false);
-        assert_eq!(unlock_yubikey(&s.state, &|_| touched.set(true)), Err(CANCELLED.into()));
+        assert_eq!(unlock_yubikey(&s.state, &|_, _, _| touched.set(true)), Err(CANCELLED.into()));
         assert!(!touched.get());
     }
 
