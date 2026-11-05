@@ -83,6 +83,8 @@ pub fn run() {
             commands::vault_unlock_yubikey,
             commands::vault_unlock_fingerprint,
             commands::vault_unlock_two_factor,
+            commands::unlock_cancel,
+            commands::yubikey_present,
             commands::yubikey_add,
             commands::yubikey_remove,
             commands::fingerprint_enable,

@@ -2,12 +2,14 @@
 //! `&AppState` and a `touch-needed` callback, so tests run them with fake devices; the Tauri
 //! commands only run them off the async runtime and emit the event.
 //!
-//! Every function holds the file-writer lock (`commands::begin`) for its whole run, but takes
-//! the vault mutex only for quick reads and the final change, never during a device call or an
-//! Argon2 run.
+//! Every function that may write the file holds the file-writer lock (`commands::begin`) for its
+//! whole run, but takes the vault mutex only for quick reads and the final change, never during a
+//! device call or an Argon2 run. Unlocking only reads the file (except the v1 upgrade), so unlock
+//! attempts run side by side: the first to finish wins, and it ends any fingerprint scan.
 
 use crate::commands::{self, AppState, LOCKED};
-use crate::unlock::DeviceError;
+use crate::unlock::{DeviceError, FingerStatus, OnStatus};
+use std::sync::atomic::Ordering;
 use crate::vault::{self, Mode, PasswordKek, Secret, TwoFactorKek, Vault, VaultError, VaultInfo, YubikeyInfo};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -33,6 +35,8 @@ pub struct UnlockMethods {
     fingerprint: bool,
     can_yubikey: bool,
     can_fingerprint: bool,
+    /// The lock screen may look for a plugged-in key and ask for a touch by itself.
+    auto_yubikey: bool,
     platform: &'static str,
 }
 
@@ -68,9 +72,21 @@ fn with_vault<T>(state: &AppState, change: impl FnOnce(&mut Vault) -> Result<T, 
     Ok(result)
 }
 
+/// Keeps the vault that is already unlocked, if any: a later attempt's copy is dropped.
 fn set_unlocked(state: &AppState, v: Vault) {
-    *state.vault.lock().unwrap() = Some(v);
+    {
+        let mut guard = state.vault.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(v);
+        }
+    }
+    state.finger_cancel.store(true, Ordering::SeqCst);
     state.touch();
+}
+
+/// An empty field means no PIN.
+fn some_pin(pin: Option<&str>) -> Option<&str> {
+    pin.filter(|p| !p.is_empty())
 }
 
 fn allowed(keys: &[YubikeyInfo]) -> Vec<(Vec<u8>, [u8; 32])> {
@@ -113,12 +129,12 @@ pub fn unlock_methods(state: &AppState) -> Result<UnlockMethods, String> {
         fingerprint: info.fingerprint.is_some(),
         can_yubikey: state.hmac_key.available(),
         can_fingerprint: state.fingerprint.available(),
+        auto_yubikey: cfg!(any(target_os = "linux", target_os = "macos")),
         platform: state.fingerprint.platform(),
     })
 }
 
 pub fn unlock_yubikey(state: &AppState, emit: Emit) -> Result<(), String> {
-    let _ops = commands::begin(state)?;
     let info = vault::read_info(&state.vault_path).map_err(vault_err)?;
     if info.mode != Mode::Any {
         return Err(not_enabled("YubiKey-only unlock"));
@@ -130,21 +146,30 @@ pub fn unlock_yubikey(state: &AppState, emit: Emit) -> Result<(), String> {
     Ok(())
 }
 
-pub fn unlock_fingerprint(state: &AppState) -> Result<(), String> {
-    let _ops = commands::begin(state)?;
+/// Only a v1 file is written (upgraded to v2), so only then is the file-writer lock taken.
+pub fn unlock_password(state: &AppState, password: &str) -> Result<(), String> {
+    let v1 = vault::read_info(&state.vault_path).is_ok_and(|i| i.version == 1);
+    let _ops = if v1 { Some(commands::begin(state)?) } else { None };
+    let v = vault::unlock(&state.vault_path, password).map_err(vault_err)?;
+    set_unlocked(state, v);
+    Ok(())
+}
+
+/// Ends with "Cancelled." when `unlock_cancel` runs or the vault is unlocked another way.
+pub fn unlock_fingerprint(state: &AppState, on_status: OnStatus) -> Result<(), String> {
     let info = vault::read_info(&state.vault_path).map_err(vault_err)?;
     let id = match (info.mode, info.fingerprint) {
         (Mode::Any, Some(id)) => id,
         _ => return Err(not_enabled("Fingerprint unlock")),
     };
-    let secret = state.fingerprint.unlock(&id).map_err(device_err)?;
+    state.finger_cancel.store(false, Ordering::SeqCst);
+    let secret = state.fingerprint.unlock(&id, &state.finger_cancel, on_status).map_err(device_err)?;
     let v = vault::unlock_with(&state.vault_path, Secret::Fingerprint { secret: &secret }).map_err(vault_err)?;
     set_unlocked(state, v);
     Ok(())
 }
 
 pub fn unlock_two_factor(state: &AppState, password: &str, emit: Emit) -> Result<(), String> {
-    let _ops = commands::begin(state)?;
     let info = vault::read_info(&state.vault_path).map_err(vault_err)?;
     if info.mode != Mode::PasswordYubikey {
         return Err(not_enabled("Password and YubiKey unlock"));
@@ -159,9 +184,10 @@ pub fn unlock_two_factor(state: &AppState, password: &str, emit: Emit) -> Result
 /// The password is needed in both modes. In `any` mode it must open the file, and the new key
 /// then unlocks on its own. In `password_yubikey` mode it must open the file with a registered
 /// key, and the new key's slot is made from it. A key that is already registered refuses.
-pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, emit: Emit) -> Result<(), String> {
+pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, pin: Option<&str>, emit: Emit) -> Result<(), String> {
     let _ops = commands::begin(state)?;
     let info = current_info(state)?;
+    let pin = some_pin(pin);
     let name = name.trim();
     if name.is_empty() {
         return Err("Give the YubiKey a name".into());
@@ -173,14 +199,14 @@ pub fn yubikey_add(state: &AppState, name: &str, password: Option<&str>, emit: E
             // Verify against the file; the copy is dropped (and wiped) right away.
             vault::unlock(&state.vault_path, password).map_err(vault_err)?;
             emit(Some(name));
-            let e = state.hmac_key.enroll(&registered).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered, pin).map_err(device_err)?;
             with_vault(state, |v| v.add_yubikey(name, &e.credential_id, e.salt, &e.hmac))?;
         }
         Mode::PasswordYubikey => {
             let password = password.ok_or(PASSWORD_NEEDED)?;
             verify_two_factor(state, &info.yubikeys, password, emit)?;
             emit(Some(name));
-            let e = state.hmac_key.enroll(&registered).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&registered, pin).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             with_vault(state, |v| v.add_yubikey_two_factor(name, &e.credential_id, e.salt, kek))?;
         }
@@ -199,14 +225,14 @@ pub fn yubikey_remove(state: &AppState, id: &str) -> Result<(), String> {
 
 /// Replaces any existing fingerprint slot. The OS item of the slot that did not end up in the
 /// file (the new one on a failed save, else the old one) is deleted.
-pub fn fingerprint_enable(state: &AppState) -> Result<(), String> {
+pub fn fingerprint_enable(state: &AppState, on_status: OnStatus) -> Result<(), String> {
     let _ops = commands::begin(state)?;
     let info = current_info(state)?;
     if info.mode != Mode::Any {
         return Err(not_enabled("Fingerprint unlock"));
     }
     let id = vault::new_slot_id();
-    let secret = state.fingerprint.enable(&id).map_err(device_err)?;
+    let secret = state.fingerprint.enable(&id, on_status).map_err(device_err)?;
     let platform = state.fingerprint.platform();
     if let Err(e) = with_vault(state, |v| v.set_fingerprint(&id, platform, &secret)) {
         disable_fingerprints(state, &[id]);
@@ -227,9 +253,17 @@ pub fn fingerprint_disable(state: &AppState) -> Result<(), String> {
 /// Rebuilds the slots for `mode`. Entering `password_yubikey` needs the password (checked on
 /// the file) and a new key; leaving it needs the password and a touch of a registered key, and
 /// that password becomes the password-only one.
-pub fn set_mode(state: &AppState, mode: Mode, password: Option<&str>, name: Option<&str>, emit: Emit) -> Result<(), String> {
+pub fn set_mode(
+    state: &AppState,
+    mode: Mode,
+    password: Option<&str>,
+    name: Option<&str>,
+    pin: Option<&str>,
+    emit: Emit,
+) -> Result<(), String> {
     let _ops = commands::begin(state)?;
     let info = current_info(state)?;
+    let pin = some_pin(pin);
     match (info.mode, mode) {
         (Mode::Password, Mode::Any) => with_vault(state, |v| v.to_any_mode(None)),
         (Mode::Any, Mode::Password) => {
@@ -243,7 +277,7 @@ pub fn set_mode(state: &AppState, mode: Mode, password: Option<&str>, name: Opti
             let name = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(DEFAULT_KEY_NAME);
             emit(Some(name));
             // Every existing slot is replaced, so an already registered key may be used again.
-            let e = state.hmac_key.enroll(&[]).map_err(device_err)?;
+            let e = state.hmac_key.enroll(&[], pin).map_err(device_err)?;
             let kek = TwoFactorKek::derive(password, &e.hmac).map_err(vault_err)?;
             let removed = with_vault(state, |v| v.to_two_factor_mode(name, &e.credential_id, e.salt, kek))?;
             disable_fingerprints(state, &removed);
@@ -289,10 +323,37 @@ pub fn change_password(state: &AppState, current: &str, new_password: &str, emit
     with_vault(state, |v| v.change_password_two_factor(keks))
 }
 
+pub fn unlock_cancel(state: &AppState) {
+    state.finger_cancel.store(true, Ordering::SeqCst);
+}
+
+pub fn yubikey_present(state: &AppState) -> bool {
+    state.hmac_key.present()
+}
+
 /// Payload of the "touch-needed" event.
 #[derive(Serialize, Clone)]
 struct TouchNeeded {
     name: Option<String>,
+}
+
+/// Payload of the "finger-status" event.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub(crate) struct FingerEvent {
+    state: &'static str,
+    message: Option<&'static str>,
+}
+
+fn finger_event(s: FingerStatus) -> FingerEvent {
+    match s {
+        FingerStatus::Scanning => FingerEvent { state: "scanning", message: None },
+        FingerStatus::Retry(m) => FingerEvent { state: "retry", message: Some(m) },
+        FingerStatus::NoMatch => FingerEvent { state: "no_match", message: None },
+    }
+}
+
+pub(crate) fn emit_finger(app: &AppHandle, s: FingerStatus) {
+    let _ = app.emit("finger-status", finger_event(s));
 }
 
 /// Runs `work` on a blocking thread (device calls and Argon2 can take seconds) and emits
@@ -358,6 +419,8 @@ mod tests {
 
     fn no_emit(_: Option<&str>) {}
 
+    fn quiet(_: FingerStatus) {}
+
     fn unlocked(state: &AppState) -> bool {
         state.vault.lock().unwrap().is_some()
     }
@@ -377,9 +440,9 @@ mod tests {
     #[test]
     fn add_key_then_unlock_with_it() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
         let names = std::cell::RefCell::new(Vec::new());
-        yubikey_add(&s.state, "Blue", Some("pw"), &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &|n| names.borrow_mut().push(n.map(str::to_owned))).unwrap();
         assert_eq!(*names.borrow(), [Some("Blue".to_string())]);
         commands::lock(&s.state);
         unlock_yubikey(&s.state, &no_emit).unwrap();
@@ -391,12 +454,12 @@ mod tests {
     #[test]
     fn unknown_key_is_not_registered() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         commands::lock(&s.state);
         // A different key is plugged in.
         s.key.creds.lock().unwrap().clear();
-        s.key.enroll(&[]).unwrap();
+        s.key.enroll(&[], None).unwrap();
         assert_eq!(unlock_yubikey(&s.state, &no_emit), Err(NOT_REGISTERED.into()));
         assert!(!unlocked(&s.state));
     }
@@ -404,8 +467,8 @@ mod tests {
     #[test]
     fn remove_key() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         let id = unlock_methods(&s.state).unwrap().yubikeys[0].id.clone();
         assert_eq!(yubikey_remove(&s.state, "nope"), Err(NOT_REGISTERED.into()));
         yubikey_remove(&s.state, &id).unwrap();
@@ -418,22 +481,22 @@ mod tests {
     #[test]
     fn fingerprint_enable_then_unlock() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
         assert!(unlock_methods(&s.state).unwrap().fingerprint);
         commands::lock(&s.state);
-        unlock_fingerprint(&s.state).unwrap();
+        unlock_fingerprint(&s.state, &quiet).unwrap();
         assert!(unlocked(&s.state));
     }
 
     #[test]
     fn fingerprint_with_cleared_store_is_not_set_up() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
         commands::lock(&s.state);
         s.finger.store.lock().unwrap().clear();
-        assert_eq!(unlock_fingerprint(&s.state), Err(DeviceError::NotSetUp.to_string()));
+        assert_eq!(unlock_fingerprint(&s.state, &quiet), Err(DeviceError::NotSetUp.to_string()));
         assert!(!unlocked(&s.state));
         assert!(vault::unlock(&s.path, "pw").is_ok());
         // The dead slot can still be removed.
@@ -445,9 +508,9 @@ mod tests {
     #[test]
     fn enabling_again_disables_the_old_os_item() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
-        fingerprint_enable(&s.state).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
         let store = s.finger.store.lock().unwrap();
         assert_eq!(store.len(), 1);
         assert!(store.contains_key(&vault::read_info(&s.path).unwrap().fingerprint.unwrap()));
@@ -456,20 +519,20 @@ mod tests {
     #[test]
     fn failed_save_disables_the_new_os_item() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
         // A directory where the vault file goes makes every save fail.
         std::fs::remove_file(&s.path).unwrap();
         std::fs::create_dir(&s.path).unwrap();
-        assert!(fingerprint_enable(&s.state).is_err());
+        assert!(fingerprint_enable(&s.state, &quiet).is_err());
         assert!(s.finger.store.lock().unwrap().is_empty());
     }
 
     #[test]
     fn leaving_any_disables_fingerprint_os_items() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
-        set_mode(&s.state, Mode::Password, None, None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        set_mode(&s.state, Mode::Password, None, None, None, &no_emit).unwrap();
         assert!(s.finger.store.lock().unwrap().is_empty());
         assert_eq!(mode(&s.state), Mode::Password);
     }
@@ -477,15 +540,15 @@ mod tests {
     #[test]
     fn two_factor_then_back_to_any() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
         // The password is checked against the file before any touch.
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(set_mode(&s.state, Mode::PasswordYubikey, Some("bad"), Some("Blue"), &no_emit), Err("Wrong password".into()));
+        assert_eq!(set_mode(&s.state, Mode::PasswordYubikey, Some("bad"), Some("Blue"), None, &no_emit), Err("Wrong password".into()));
         assert!(s.key.creds.lock().unwrap().is_empty());
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
 
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), None, &no_emit).unwrap();
         assert!(s.finger.store.lock().unwrap().is_empty());
         assert!(matches!(vault::unlock(&s.path, "pw"), Err(vault::VaultError::NotAllowed(_))));
         commands::lock(&s.state);
@@ -496,10 +559,10 @@ mod tests {
 
         // Leaving needs the password and a touch; a wrong password writes nothing.
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(set_mode(&s.state, Mode::Any, Some("bad"), None, &no_emit), Err("Wrong password".into()));
+        assert_eq!(set_mode(&s.state, Mode::Any, Some("bad"), None, None, &no_emit), Err("Wrong password".into()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
-        assert_eq!(set_mode(&s.state, Mode::Any, None, None, &no_emit), Err(PASSWORD_NEEDED.into()));
-        set_mode(&s.state, Mode::Any, Some("pw"), None, &no_emit).unwrap();
+        assert_eq!(set_mode(&s.state, Mode::Any, None, None, None, &no_emit), Err(PASSWORD_NEEDED.into()));
+        set_mode(&s.state, Mode::Any, Some("pw"), None, None, &no_emit).unwrap();
         assert_eq!(mode(&s.state), Mode::Any);
         assert_eq!(labels(&vault::unlock(&s.path, "pw").unwrap().accounts), ["Acme/me"]);
     }
@@ -507,9 +570,9 @@ mod tests {
     #[test]
     fn two_factor_to_password() {
         let s = setup();
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), None, None, &no_emit).unwrap();
         assert_eq!(unlock_methods(&s.state).unwrap().yubikeys[0].name, "YubiKey");
-        set_mode(&s.state, Mode::Password, Some("pw"), None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Password, Some("pw"), None, None, &no_emit).unwrap();
         assert_eq!(mode(&s.state), Mode::Password);
         assert!(vault::unlock(&s.path, "pw").is_ok());
     }
@@ -517,15 +580,15 @@ mod tests {
     #[test]
     fn add_second_key_in_two_factor_mode() {
         let s = setup();
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(yubikey_add(&s.state, "Red", None, &no_emit), Err(PASSWORD_NEEDED.into()));
-        assert_eq!(yubikey_add(&s.state, "Red", Some("bad"), &no_emit), Err("Wrong password".into()));
+        assert_eq!(yubikey_add(&s.state, "Red", None, None, &no_emit), Err(PASSWORD_NEEDED.into()));
+        assert_eq!(yubikey_add(&s.state, "Red", Some("bad"), None, &no_emit), Err("Wrong password".into()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         // The backup key is plugged in next to Blue.
         *s.key.device.lock().unwrap() = 1;
         let count = Cell::new(0);
-        yubikey_add(&s.state, "Red", Some("pw"), &|_| count.set(count.get() + 1)).unwrap();
+        yubikey_add(&s.state, "Red", Some("pw"), None, &|_| count.set(count.get() + 1)).unwrap();
         // One touch to prove the password with a registered key, one to enroll.
         assert_eq!(count.get(), 2);
         assert!(unlock_with_key(&s.path, &s.key, 1, "pw").is_ok());
@@ -535,30 +598,30 @@ mod tests {
     #[test]
     fn add_in_any_mode_needs_the_password() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(yubikey_add(&s.state, "Blue", None, &no_emit), Err(PASSWORD_NEEDED.into()));
-        assert_eq!(yubikey_add(&s.state, "Blue", Some("bad"), &no_emit), Err("Wrong password".into()));
+        assert_eq!(yubikey_add(&s.state, "Blue", None, None, &no_emit), Err(PASSWORD_NEEDED.into()));
+        assert_eq!(yubikey_add(&s.state, "Blue", Some("bad"), None, &no_emit), Err("Wrong password".into()));
         assert!(s.key.creds.lock().unwrap().is_empty(), "no touch before the password is checked");
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
-        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
     }
 
     #[test]
     fn adding_the_same_key_again_fails() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
+        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), None, &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
 
         // Two-factor mode: Blue proves the password, then refuses to register twice.
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
-        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
+        assert_eq!(yubikey_add(&s.state, "Blue again", Some("pw"), None, &no_emit), Err(DeviceError::AlreadyRegistered.to_string()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         assert_eq!(unlock_methods(&s.state).unwrap().yubikeys.len(), 1);
     }
@@ -570,7 +633,10 @@ mod tests {
         fn available(&self) -> bool {
             true
         }
-        fn enroll(&self, _exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+        fn present(&self) -> bool {
+            true
+        }
+        fn enroll(&self, _exclude: &[Vec<u8>], _pin: Option<&str>) -> Result<Enrolled, DeviceError> {
             Err(DeviceError::Other("not used".into()))
         }
         fn assert(&self, _allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
@@ -581,14 +647,14 @@ mod tests {
     #[test]
     fn leaving_two_factor_with_a_wrong_key_writes_nothing() {
         let s = setup();
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
 
         // An unregistered key is plugged in instead of Blue.
         let blue = std::mem::take(&mut *s.key.creds.lock().unwrap());
-        s.key.enroll(&[]).unwrap();
+        s.key.enroll(&[], None).unwrap();
         for to in [Mode::Any, Mode::Password] {
-            assert_eq!(set_mode(&s.state, to, Some("pw"), None, &no_emit), Err(NOT_REGISTERED.into()));
+            assert_eq!(set_mode(&s.state, to, Some("pw"), None, None, &no_emit), Err(NOT_REGISTERED.into()));
             assert_eq!(std::fs::read(&s.path).unwrap(), before);
             assert_eq!(mode(&s.state), Mode::PasswordYubikey);
         }
@@ -596,7 +662,7 @@ mod tests {
         // A key that answers with a credential the vault does not know.
         let stranger = AppState::with_devices(s.path.clone(), Arc::new(StrangerKey), s.finger.clone());
         *stranger.vault.lock().unwrap() = s.state.vault.lock().unwrap().take();
-        assert!(set_mode(&stranger, Mode::Any, Some("pw"), None, &no_emit).is_err());
+        assert!(set_mode(&stranger, Mode::Any, Some("pw"), None, None, &no_emit).is_err());
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         assert_eq!(mode(&stranger), Mode::PasswordYubikey);
 
@@ -610,13 +676,13 @@ mod tests {
     #[test]
     fn timeout_leaves_file_unchanged() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
         *s.key.next.lock().unwrap() = Some(DeviceError::Timeout);
-        assert_eq!(yubikey_add(&s.state, "Blue", Some("pw"), &no_emit), Err(DeviceError::Timeout.to_string()));
+        assert_eq!(yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit), Err(DeviceError::Timeout.to_string()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         *s.key.next.lock().unwrap() = Some(DeviceError::Timeout);
-        assert!(set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), None, &no_emit).is_err());
+        assert!(set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), None, None, &no_emit).is_err());
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
         assert_eq!(mode(&s.state), Mode::Any);
     }
@@ -624,9 +690,9 @@ mod tests {
     #[test]
     fn unlock_methods_while_locked_has_no_secrets() {
         let s = setup();
-        set_mode(&s.state, Mode::Any, None, None, &no_emit).unwrap();
-        yubikey_add(&s.state, "Blue", Some("pw"), &no_emit).unwrap();
-        fingerprint_enable(&s.state).unwrap();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
         commands::lock(&s.state);
         let m = unlock_methods(&s.state).unwrap();
         assert_eq!(m.mode, Mode::Any);
@@ -642,9 +708,9 @@ mod tests {
     #[test]
     fn change_password_two_factor_touches_each_key() {
         let s = setup();
-        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Blue"), None, &no_emit).unwrap();
         *s.key.device.lock().unwrap() = 1;
-        yubikey_add(&s.state, "Red", Some("pw"), &no_emit).unwrap();
+        yubikey_add(&s.state, "Red", Some("pw"), None, &no_emit).unwrap();
         let before = std::fs::read(&s.path).unwrap();
         assert_eq!(change_password(&s.state, "bad", "new", &no_emit), Err("Wrong password".into()));
         assert_eq!(std::fs::read(&s.path).unwrap(), before);
@@ -670,7 +736,7 @@ mod tests {
     fn busy_while_another_change_runs() {
         let s = setup();
         let ops = commands::begin(&s.state).unwrap();
-        assert_eq!(set_mode(&s.state, Mode::Any, None, None, &no_emit), Err("Another vault change is in progress. Try again.".into()));
+        assert_eq!(set_mode(&s.state, Mode::Any, None, None, None, &no_emit), Err("Another vault change is in progress. Try again.".into()));
         commands::lock(&s.state);
         assert!(unlock_two_factor(&s.state, "pw", &no_emit).is_err());
         drop(ops);
@@ -692,8 +758,8 @@ mod tests {
     fn locked_vault_refuses_changes() {
         let s = setup();
         commands::lock(&s.state);
-        assert_eq!(set_mode(&s.state, Mode::Any, None, None, &no_emit), Err(commands::LOCKED.into()));
-        assert_eq!(fingerprint_enable(&s.state), Err(commands::LOCKED.into()));
+        assert_eq!(set_mode(&s.state, Mode::Any, None, None, None, &no_emit), Err(commands::LOCKED.into()));
+        assert_eq!(fingerprint_enable(&s.state, &quiet), Err(commands::LOCKED.into()));
     }
 
     /// A key that records whether the vault mutex was free during each device call.
@@ -717,9 +783,12 @@ mod tests {
         fn available(&self) -> bool {
             true
         }
-        fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+        fn present(&self) -> bool {
+            true
+        }
+        fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError> {
             self.check();
-            self.inner.enroll(exclude)
+            self.inner.enroll(exclude, pin)
         }
         fn assert(&self, allowed: &[(Vec<u8>, [u8; 32])]) -> Result<(Vec<u8>, Zeroizing<[u8; 32]>), DeviceError> {
             self.check();
@@ -736,12 +805,168 @@ mod tests {
         let state = Arc::new(AppState::with_devices(path, key.clone(), Arc::new(FakeFinger::default())));
         key.state.set(Arc::downgrade(&state)).unwrap();
         *state.vault.lock().unwrap() = Some(v);
-        set_mode(&state, Mode::PasswordYubikey, Some("pw"), None, &no_emit).unwrap();
+        set_mode(&state, Mode::PasswordYubikey, Some("pw"), None, None, &no_emit).unwrap();
         *key.inner.device.lock().unwrap() = 1;
-        yubikey_add(&state, "Red", Some("pw"), &no_emit).unwrap();
+        yubikey_add(&state, "Red", Some("pw"), None, &no_emit).unwrap();
         change_password(&state, "pw", "new", &no_emit).unwrap();
         commands::lock(&state);
         unlock_two_factor(&state, "new", &no_emit).unwrap();
         assert!(!key.saw_vault_held.load(Ordering::SeqCst));
+    }
+
+    const BUSY: &str = "Another vault change is in progress. Try again.";
+    const CANCELLED: &str = "Cancelled.";
+
+    /// Mode `any` with a fingerprint set up, locked, and the fake scan waiting until cancelled.
+    fn locked_with_blocking_finger() -> Setup {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        commands::lock(&s.state);
+        s.finger.block.store(true, Ordering::SeqCst);
+        *s.finger.statuses.lock().unwrap() = vec![FingerStatus::Scanning];
+        s
+    }
+
+    /// Runs a fingerprint unlock on another thread and returns once its scan is running.
+    fn scan_in_background<'s>(
+        scope: &'s std::thread::Scope<'s, '_>,
+        state: &'s AppState,
+    ) -> std::thread::ScopedJoinHandle<'s, Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = scope.spawn(move || unlock_fingerprint(state, &|_| tx.send(()).unwrap()));
+        rx.recv().unwrap();
+        handle
+    }
+
+    #[test]
+    fn password_unlock_while_fingerprint_scans() {
+        let s = locked_with_blocking_finger();
+        std::thread::scope(|scope| {
+            let scan = scan_in_background(scope, &s.state);
+            unlock_password(&s.state, "pw").unwrap();
+            assert_eq!(scan.join().unwrap(), Err(CANCELLED.into()));
+        });
+        assert_eq!(labels(&s.state.vault.lock().unwrap().as_ref().unwrap().accounts), ["Acme/me"]);
+    }
+
+    #[test]
+    fn unlock_cancel_ends_a_running_scan() {
+        let s = locked_with_blocking_finger();
+        std::thread::scope(|scope| {
+            let scan = scan_in_background(scope, &s.state);
+            unlock_cancel(&s.state);
+            assert_eq!(scan.join().unwrap(), Err(CANCELLED.into()));
+        });
+        assert!(!unlocked(&s.state));
+        // The next scan starts fresh.
+        s.finger.block.store(false, Ordering::SeqCst);
+        unlock_fingerprint(&s.state, &quiet).unwrap();
+        assert!(unlocked(&s.state));
+    }
+
+    #[test]
+    fn attempt_finishing_after_unlock_keeps_the_first_vault() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        commands::lock(&s.state);
+        unlock_password(&s.state, "pw").unwrap();
+        // Marks the vault in memory only, to tell it from a fresh copy.
+        s.state.vault.lock().unwrap().as_mut().unwrap().accounts.clear();
+        unlock_fingerprint(&s.state, &quiet).unwrap();
+        unlock_yubikey(&s.state, &no_emit).unwrap();
+        unlock_password(&s.state, "pw").unwrap();
+        assert!(s.state.vault.lock().unwrap().as_ref().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn unlocks_do_not_take_the_ops_lock() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        let _ops = commands::begin(&s.state).unwrap();
+        commands::lock(&s.state);
+        unlock_password(&s.state, "pw").unwrap();
+        commands::lock(&s.state);
+        unlock_fingerprint(&s.state, &quiet).unwrap();
+        commands::lock(&s.state);
+        unlock_yubikey(&s.state, &no_emit).unwrap();
+        assert!(unlocked(&s.state));
+    }
+
+    #[test]
+    fn v1_password_unlock_takes_the_ops_lock_and_upgrades() {
+        let s = setup();
+        commands::lock(&s.state);
+        vault::tests::write_v1(&s.path, "pw", &[account()]);
+        let ops = commands::begin(&s.state).unwrap();
+        assert_eq!(unlock_password(&s.state, "pw"), Err(BUSY.into()));
+        assert_eq!(vault::read_info(&s.path).unwrap().version, 1);
+        drop(ops);
+        unlock_password(&s.state, "pw").unwrap();
+        assert_eq!(vault::read_info(&s.path).unwrap().version, 2);
+        assert_eq!(labels(&s.state.vault.lock().unwrap().as_ref().unwrap().accounts), ["Acme/me"]);
+    }
+
+    #[test]
+    fn enroll_gets_the_pin() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        yubikey_add(&s.state, "Blue", Some("pw"), Some("1234"), &no_emit).unwrap();
+        *s.key.device.lock().unwrap() = 1;
+        yubikey_add(&s.state, "Red", Some("pw"), Some(""), &no_emit).unwrap();
+        set_mode(&s.state, Mode::PasswordYubikey, Some("pw"), Some("Green"), Some("5678"), &no_emit).unwrap();
+        assert_eq!(
+            *s.key.pins.lock().unwrap(),
+            [Some("1234".to_string()), None, Some("5678".to_string())]
+        );
+    }
+
+    #[test]
+    fn pin_errors_reach_the_ui_as_sentences() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        for (e, text) in [
+            (DeviceError::PinRequired, "This YubiKey has a PIN. Enter it to register the key."),
+            (DeviceError::WrongPin, "Wrong YubiKey PIN."),
+        ] {
+            *s.key.next.lock().unwrap() = Some(e);
+            assert_eq!(yubikey_add(&s.state, "Blue", Some("pw"), None, &no_emit), Err(text.into()));
+        }
+        assert!(unlock_methods(&s.state).unwrap().yubikeys.is_empty());
+    }
+
+    #[test]
+    fn finger_status_reported_in_order() {
+        let s = setup();
+        set_mode(&s.state, Mode::Any, None, None, None, &no_emit).unwrap();
+        fingerprint_enable(&s.state, &quiet).unwrap();
+        commands::lock(&s.state);
+        let sequence = vec![FingerStatus::Scanning, FingerStatus::Retry("Swipe longer."), FingerStatus::Scanning];
+        *s.finger.statuses.lock().unwrap() = sequence.clone();
+        let seen = std::cell::RefCell::new(Vec::new());
+        unlock_fingerprint(&s.state, &|st| seen.borrow_mut().push(st)).unwrap();
+        assert_eq!(*seen.borrow(), sequence);
+    }
+
+    #[test]
+    fn finger_event_payloads() {
+        let json = |st| serde_json::to_value(finger_event(st)).unwrap();
+        assert_eq!(json(FingerStatus::Scanning), serde_json::json!({ "state": "scanning", "message": null }));
+        assert_eq!(
+            json(FingerStatus::Retry("Center your finger.")),
+            serde_json::json!({ "state": "retry", "message": "Center your finger." })
+        );
+        assert_eq!(json(FingerStatus::NoMatch), serde_json::json!({ "state": "no_match", "message": null }));
+    }
+
+    #[test]
+    fn yubikey_presence_and_auto_flag() {
+        let s = setup();
+        assert!(yubikey_present(&s.state));
+        assert_eq!(unlock_methods(&s.state).unwrap().auto_yubikey, cfg!(any(target_os = "linux", target_os = "macos")));
     }
 }

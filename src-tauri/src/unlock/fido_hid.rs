@@ -43,6 +43,10 @@ fn map_error(msg: &str) -> DeviceError {
         DeviceError::Cancelled
     } else if msg.contains("FIDO device not found") {
         DeviceError::NoDevice
+    } else if msg.contains("CTAP2_ERR_PIN_INVALID") {
+        DeviceError::WrongPin
+    } else if msg.contains("CTAP2_ERR_PIN_BLOCKED") || msg.contains("CTAP2_ERR_PIN_AUTH_BLOCKED") {
+        DeviceError::PinBlocked
     } else if [
         "CTAP2_ERR_PIN_REQUIRED",
         "CTAP2_ERR_PUAT_REQUIRED",
@@ -52,10 +56,7 @@ fn map_error(msg: &str) -> DeviceError {
     .iter()
     .any(|code| msg.contains(code))
     {
-        DeviceError::Unsupported(
-            "This security key needs its PIN to register, which Deskauth does not support yet."
-                .into(),
-        )
+        DeviceError::PinRequired
     } else if msg.contains("CTAP2_ERR_LIMIT_EXCEEDED") {
         DeviceError::Unsupported(
             "Too many YubiKeys are registered for this key to check at once.".into(),
@@ -198,9 +199,15 @@ impl HmacKey for HidKey {
         true
     }
 
+    fn present(&self) -> bool {
+        !get_fidokey_devices().is_empty()
+    }
+
     /// Uses the first FIDO device found when several are plugged in. `exclude` is sent as the
-    /// excludeList, so a key that is already registered refuses.
-    fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+    /// excludeList, so a key that is already registered refuses. With `pin`, makeCredential
+    /// carries a pinUvAuthParam (keys whose firmware wants the PIN to register); the assertion
+    /// after it stays touch only, like every unlock, so both get the same hmac output.
+    fn enroll(&self, exclude: &[Vec<u8>], pin: Option<&str>) -> Result<Enrolled, DeviceError> {
         let param = get_fidokey_devices()
             .into_iter()
             .next()
@@ -211,8 +218,12 @@ impl HmacKey for HidKey {
         let user_id = random::<32>();
         let user =
             PublicKeyCredentialUserEntity::new(Some(&user_id), Some("deskauth"), Some("Deskauth"));
-        let mut builder = MakeCredentialArgsBuilder::new(RP_ID, &challenge)
-            .without_pin_and_uv()
+        let builder = MakeCredentialArgsBuilder::new(RP_ID, &challenge);
+        let builder = match pin {
+            Some(pin) => builder.pin(pin),
+            None => builder.without_pin_and_uv(),
+        };
+        let mut builder = builder
             .user_entity(&user)
             .extensions(&[MakeExt::HmacSecret(Some(true))]);
         for id in exclude {
@@ -301,19 +312,29 @@ mod tests {
     }
 
     #[test]
-    fn pin_and_limit_errors_are_plain_sentences() {
-        let pin = DeviceError::Unsupported(
-            "This security key needs its PIN to register, which Deskauth does not support yet."
-                .into(),
-        );
+    fn pin_errors_map() {
         for msg in [
             "response_status err = 0x36 CTAP2_ERR_PIN_REQUIRED  PIN is required for the selected operation.",
             "response_status err = 0x36 CTAP2_ERR_PUAT_REQUIRED",
             "response_status err = 0x33 CTAP2_ERR_PIN_AUTH_INVALID PIN authentication, pinAuth, verification failed.",
             "response_status err = 0x27 CTAP2_ERR_OPERATION_DENIED  Not authorized for requested operation.",
         ] {
-            assert_eq!(map_error(msg), pin, "{msg}");
+            assert_eq!(map_error(msg), DeviceError::PinRequired, "{msg}");
         }
+        assert_eq!(
+            map_error("response_status err = 0x31 CTAP2_ERR_PIN_INVALID   PIN Invalid."),
+            DeviceError::WrongPin
+        );
+        for msg in [
+            "response_status err = 0x32 CTAP2_ERR_PIN_BLOCKED PIN Blocked.",
+            "response_status err = 0x34 CTAP2_ERR_PIN_AUTH_BLOCKED PIN authentication, pinAuth, blocked.Requires power recycle to reset.",
+        ] {
+            assert_eq!(map_error(msg), DeviceError::PinBlocked, "{msg}");
+        }
+    }
+
+    #[test]
+    fn limit_and_hmac_errors_are_plain_sentences() {
         assert_eq!(
             map_error(
                 "response_status err = 0x15 CTAP2_ERR_LIMIT_EXCEEDED Limit for number of items exceeded."

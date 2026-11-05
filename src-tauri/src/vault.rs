@@ -1065,7 +1065,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::account::Algorithm;
 
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     /// Writes a file the way the v1 app did: the Argon2id key encrypts the accounts directly.
-    fn write_v1(path: &Path, password: &str, accounts: &[Account]) {
+    pub(crate) fn write_v1(path: &Path, password: &str, accounts: &[Account]) {
         let salt = random_bytes::<SALT_LEN>();
         let key = derive_key(password, &salt).unwrap();
         let nonce = random_bytes::<NONCE_LEN>();

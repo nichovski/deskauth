@@ -49,6 +49,8 @@ pub use imp::TouchIdFinger;
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use std::sync::atomic::AtomicBool;
+
     use rand::RngCore;
     use rand::rngs::OsRng;
     use security_framework::access_control::{ProtectionMode, SecAccessControl};
@@ -59,7 +61,7 @@ mod imp {
     use zeroize::Zeroizing;
 
     use super::{ERR_ITEM_NOT_FOUND, account, keychain_error, secret_from_bytes};
-    use crate::unlock::{DeviceError, Fingerprint};
+    use crate::unlock::{DeviceError, FingerStatus, Fingerprint, OnStatus};
 
     const SERVICE: &str = "deskauth";
 
@@ -113,7 +115,8 @@ mod imp {
 
         /// Replaces any old item, then reads it back once so the finger is checked and the
         /// item is known to work before the slot is written.
-        fn enable(&self, slot_id: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+        fn enable(&self, slot_id: &str, on_status: OnStatus) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+            on_status(FingerStatus::Scanning);
             delete(slot_id)?;
             let mut secret = Zeroizing::new([0u8; 32]);
             OsRng.fill_bytes(secret.as_mut());
@@ -133,7 +136,14 @@ mod imp {
             }
         }
 
-        fn unlock(&self, slot_id: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+        /// The Touch ID prompt owns the wait, so `cancel` is not checked.
+        fn unlock(
+            &self,
+            slot_id: &str,
+            _cancel: &AtomicBool,
+            on_status: OnStatus,
+        ) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+            on_status(FingerStatus::Scanning);
             read(slot_id)
         }
 

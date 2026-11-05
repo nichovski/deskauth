@@ -391,7 +391,13 @@ mod imp {
             supports_hmac_salts(unsafe { WebAuthNGetApiVersionNumber() })
         }
 
-        fn enroll(&self, exclude: &[Vec<u8>]) -> Result<Enrolled, DeviceError> {
+        /// Never true: polling for a key must not make Windows show its dialog.
+        fn present(&self) -> bool {
+            false
+        }
+
+        /// Windows asks for the PIN itself when the key has one.
+        fn enroll(&self, exclude: &[Vec<u8>], _pin: Option<&str>) -> Result<Enrolled, DeviceError> {
             let credential_id = make_credential(exclude)?;
             let salt = random::<32>();
             let (_, hmac) = get_assertion(&[(credential_id.clone(), salt)])?;

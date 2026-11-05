@@ -65,6 +65,8 @@ pub use imp::HelloFinger;
 
 #[cfg(windows)]
 mod imp {
+    use std::sync::atomic::AtomicBool;
+
     use windows::Security::Credentials::{
         KeyCredential, KeyCredentialCreationOption, KeyCredentialManager,
     };
@@ -75,7 +77,7 @@ mod imp {
     use super::{
         already_deleted, challenge, hello_error, hello_status, key_name, secret_from_signature,
     };
-    use crate::unlock::{DeviceError, Fingerprint};
+    use crate::unlock::{DeviceError, FingerStatus, Fingerprint, OnStatus};
 
     pub struct HelloFinger;
 
@@ -116,7 +118,8 @@ mod imp {
             "windows"
         }
 
-        fn enable(&self, slot_id: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+        fn enable(&self, slot_id: &str, on_status: OnStatus) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+            on_status(FingerStatus::Scanning);
             let created = KeyCredentialManager::RequestCreateAsync(
                 &name(slot_id),
                 KeyCredentialCreationOption::ReplaceExisting,
@@ -127,7 +130,14 @@ mod imp {
             sign(&created.Credential().map_err(win_error)?, slot_id)
         }
 
-        fn unlock(&self, slot_id: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+        /// The Windows Hello dialog owns the wait, so `cancel` is not checked.
+        fn unlock(
+            &self,
+            slot_id: &str,
+            _cancel: &AtomicBool,
+            on_status: OnStatus,
+        ) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+            on_status(FingerStatus::Scanning);
             let opened = KeyCredentialManager::OpenAsync(&name(slot_id))
                 .and_then(|op| op.join())
                 .map_err(win_error)?;

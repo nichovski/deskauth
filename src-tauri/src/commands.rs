@@ -5,15 +5,17 @@ use crate::merge::{self, MergeResult};
 use crate::qr;
 use crate::theme::{self, Palette};
 use crate::totp;
-use crate::unlock::{self, Fingerprint, HmacKey};
+use crate::unlock::{self, FingerStatus, Fingerprint, HmacKey};
 use crate::unlock_commands::{self, blocking, UnlockMethods};
 use crate::vault::{self, Mode, Vault};
 use base64::Engine;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use zeroize::Zeroizing;
 
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
 
@@ -32,6 +34,8 @@ pub struct AppState {
     /// them never race on it. Taken before `vault`, never the other way round. Reads such as
     /// the 1 s `codes` poll do not take it.
     pub ops: Mutex<()>,
+    /// Set to stop a running fingerprint scan; cleared when a scan starts.
+    pub finger_cancel: AtomicBool,
 }
 
 impl AppState {
@@ -50,6 +54,7 @@ impl AppState {
             hmac_key,
             fingerprint,
             ops: Mutex::new(()),
+            finger_cancel: AtomicBool::new(false),
         }
     }
 
@@ -142,12 +147,7 @@ pub async fn vault_create(password: String, state: State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub async fn vault_unlock(password: String, state: State<'_, AppState>) -> Result<(), String> {
-    // Unlocking a v1 file rewrites it as v2.
-    let _ops = begin(&state)?;
-    let v = vault::unlock(&state.vault_path, &password).map_err(|e| e.to_string())?;
-    *state.vault.lock().unwrap() = Some(v);
-    state.touch();
-    Ok(())
+    unlock_commands::unlock_password(&state, &password)
 }
 
 /// Locks the vault, stops any camera scan and forgets a half-done import.
@@ -481,9 +481,27 @@ pub async fn vault_unlock_yubikey(app: AppHandle) -> Result<(), String> {
     blocking(app, unlock_commands::unlock_yubikey).await
 }
 
+/// Emits "finger-status" while the scan runs.
 #[tauri::command]
 pub async fn vault_unlock_fingerprint(app: AppHandle) -> Result<(), String> {
-    blocking(app, |state, _| unlock_commands::unlock_fingerprint(state)).await
+    let emitter = app.clone();
+    blocking(app, move |state, _| {
+        unlock_commands::unlock_fingerprint(state, &|s: FingerStatus| unlock_commands::emit_finger(&emitter, s))
+    })
+    .await
+}
+
+/// Stops a running fingerprint scan, which then ends with "Cancelled.".
+#[tauri::command]
+pub fn unlock_cancel(state: State<AppState>) -> Result<(), String> {
+    unlock_commands::unlock_cancel(&state);
+    Ok(())
+}
+
+/// Only lists devices, so polling it never asks for a touch.
+#[tauri::command]
+pub async fn yubikey_present(app: AppHandle) -> Result<bool, String> {
+    blocking(app, |state, _| Ok(unlock_commands::yubikey_present(state))).await
 }
 
 #[tauri::command]
@@ -492,8 +510,12 @@ pub async fn vault_unlock_two_factor(password: String, app: AppHandle) -> Result
 }
 
 #[tauri::command]
-pub async fn yubikey_add(name: String, password: Option<String>, app: AppHandle) -> Result<(), String> {
-    blocking(app, move |state, emit| unlock_commands::yubikey_add(state, &name, password.as_deref(), emit)).await
+pub async fn yubikey_add(name: String, password: Option<String>, pin: Option<String>, app: AppHandle) -> Result<(), String> {
+    let pin = pin.map(Zeroizing::new);
+    blocking(app, move |state, emit| {
+        unlock_commands::yubikey_add(state, &name, password.as_deref(), pin.as_deref().map(String::as_str), emit)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -503,7 +525,11 @@ pub async fn yubikey_remove(id: String, app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn fingerprint_enable(app: AppHandle) -> Result<(), String> {
-    blocking(app, |state, _| unlock_commands::fingerprint_enable(state)).await
+    let emitter = app.clone();
+    blocking(app, move |state, _| {
+        unlock_commands::fingerprint_enable(state, &|s: FingerStatus| unlock_commands::emit_finger(&emitter, s))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -512,9 +538,17 @@ pub async fn fingerprint_disable(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn set_mode(mode: Mode, password: Option<String>, name: Option<String>, app: AppHandle) -> Result<(), String> {
+pub async fn set_mode(
+    mode: Mode,
+    password: Option<String>,
+    name: Option<String>,
+    pin: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let pin = pin.map(Zeroizing::new);
     blocking(app, move |state, emit| {
-        unlock_commands::set_mode(state, mode, password.as_deref(), name.as_deref(), emit)
+        let pin = pin.as_deref().map(String::as_str);
+        unlock_commands::set_mode(state, mode, password.as_deref(), name.as_deref(), pin, emit)
     })
     .await
 }
