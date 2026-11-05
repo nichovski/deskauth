@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Unlock with a YubiKey (FIDO2 touch) or fingerprint, in three modes: password only, any one method, or password and YubiKey together. Vault file v2 with key slots; v1 files upgrade on the next password unlock.
 - App icon (countdown ring and keyhole) replacing the Tauri template icons, a scalable icon in the Arch package, and README screenshots in eight Omarchy themes with a platform table.
 - Deskauth: a desktop TOTP authenticator for Linux, Windows and macOS, so codes no longer need the phone.
 - Import from Google Authenticator's export QR, by camera or image file, including exports split over several QR codes. Re-import merges and skips accounts you already have.

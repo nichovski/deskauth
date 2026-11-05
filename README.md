@@ -38,6 +38,26 @@ Read this before you use it.
 - There is no recovery. If you forget the master password, the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
 - The app locks itself after 5 minutes of no use. A copied code is cleared from the clipboard after 30 seconds.
 
+## Unlock with a YubiKey or fingerprint
+
+Settings > Unlock methods has three modes:
+
+- **Password only.** Only the master password opens the vault.
+- **Password, YubiKey or fingerprint.** Any one of them opens the vault. The password always works, so it is your way back in.
+- **Password and YubiKey together.** You need the password and a touch of a registered YubiKey. Nothing else opens the vault. Register a backup key: if you lose your only key, you lose the vault.
+
+The YubiKey uses FIDO2 `hmac-secret` with a touch only.
+
+- A FIDO2 PIN on the key is not supported yet.
+- Linux needs the usual udev rules for FIDO keys. On Arch the `libfido2` package provides them.
+- Windows needs Windows 11 22H2 or later (WebAuthn API v4) for the YubiKey. Windows shows its own touch dialog. The fingerprint uses Windows Hello.
+- macOS uses Touch ID for the fingerprint. It needs a signed build with the `keychain-access-groups` entitlement. Unsigned builds show "Touch ID unlock needs a signed build of Deskauth."
+- macOS and Windows unlock methods are untested on real hardware so far.
+
+On Linux the fingerprint is convenience, not extra security: the secret it guards sits in your keyring, and any program running as you can read it while you are logged in.
+
+Removing a lost YubiKey does not protect old copies of `vault.json`. An old copy plus that key still opens the accounts that existed then. Switching into or out of "Password and YubiKey together" makes a fresh vault key.
+
 ## Import from Google Authenticator
 
 Google has no API, so the import uses the export screen of the phone app.
