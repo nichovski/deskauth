@@ -46,9 +46,10 @@ Settings > Unlock methods has three modes:
 - **Password, YubiKey or fingerprint.** Any one of them opens the vault. The password always works, so it is your way back in.
 - **Password and YubiKey together.** You need the password and a touch of a registered YubiKey. Nothing else opens the vault. Register a backup key: if you lose your only key, you lose the vault.
 
-The YubiKey uses FIDO2 `hmac-secret` with a touch only. Adding a YubiKey asks for your current password, and a key that is already registered is refused.
+The YubiKey uses FIDO2 `hmac-secret` with a touch only. Adding a YubiKey asks for your current password, and a key that is already registered is refused. If the key has a FIDO2 PIN, type it in the "YubiKey PIN" field when you register the key. Unlocking never asks for the PIN, only for a touch.
 
-- A FIDO2 PIN on the key is not supported yet.
+In "Password, YubiKey or fingerprint" the lock screen listens by itself: it starts a fingerprint scan as soon as it shows, and asks for a touch when a registered YubiKey is plugged in. You can type the password at the same time. On Windows the YubiKey still needs a click on "Use YubiKey", so its dialog does not pop up by itself.
+
 - Linux needs the usual udev rules for FIDO keys. On Arch the `libfido2` package provides them.
 - Windows needs Windows 11 22H2 or later (WebAuthn API v4) for the YubiKey. Windows shows its own touch dialog. The fingerprint uses Windows Hello.
 - macOS uses Touch ID for the fingerprint. It needs a signed build with the `keychain-access-groups` entitlement. Unsigned builds show "Touch ID unlock needs a signed build of Deskauth."

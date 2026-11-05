@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- Lock screen listens by itself: the fingerprint scan starts when it shows (with an animated icon and "Scan again" hints), and a plugged-in YubiKey is asked for a touch, while the password still works. YubiKeys with a FIDO2 PIN can be registered: the PIN is asked when adding the key, never on unlock.
 - Unlock with a YubiKey (FIDO2 touch) or fingerprint, in three modes: password only, any one method, or password and YubiKey together. Vault file v2 with key slots; v1 files upgrade on the next password unlock. Older Deskauth versions cannot open a v2 vault, so keep a backup of `vault.json` before the first unlock with this version.
 - App icon (countdown ring and keyhole) replacing the Tauri template icons, a scalable icon in the Arch package, and README screenshots in eight Omarchy themes with a platform table.
 - Deskauth: a desktop TOTP authenticator for Linux, Windows and macOS, so codes no longer need the phone.
