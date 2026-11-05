@@ -38,7 +38,7 @@ impl fmt::Display for DeviceError {
                 "Fingerprint unlock is no longer set up, use your password."
             ),
             DeviceError::Unsupported(m) => write!(f, "{m}"),
-            DeviceError::Other(m) => write!(f, "Device error: {m}"),
+            DeviceError::Other(m) => write!(f, "{m}"),
         }
     }
 }
@@ -303,6 +303,14 @@ mod tests {
         assert_eq!(*f.unlock("s1").unwrap(), *secret);
         f.disable("s1").unwrap();
         assert_eq!(f.unlock("s1").err(), Some(DeviceError::NotSetUp));
+    }
+
+    #[test]
+    fn other_displays_only_the_sentence() {
+        assert_eq!(
+            DeviceError::Other("Fingerprint did not match.".into()).to_string(),
+            "Fingerprint did not match."
+        );
     }
 
     #[test]

@@ -63,8 +63,16 @@ fn map_error(msg: &str) -> DeviceError {
             .split_whitespace()
             .find(|w| w.starts_with("CTAP"))
             .unwrap_or(msg.trim());
-        DeviceError::Other(short.to_string())
+        key_error(short)
     }
+}
+
+/// A sentence around a raw library code or message the user cannot act on directly.
+fn key_error(code: &str) -> DeviceError {
+    DeviceError::Other(format!(
+        "Security key error: {}.",
+        code.trim_end_matches('.')
+    ))
 }
 
 /// CTAP2 lets the authenticator omit the credential id when the allow list has exactly one
@@ -322,11 +330,11 @@ mod tests {
             map_error(
                 "response_status err = 0x01 CTAP1_ERR_INVALID_COMMAND The command is not a valid CTAP command."
             ),
-            DeviceError::Other("CTAP1_ERR_INVALID_COMMAND".into())
+            DeviceError::Other("Security key error: CTAP1_ERR_INVALID_COMMAND.".into())
         );
         assert_eq!(
             map_error("Failed to open device."),
-            DeviceError::Other("Failed to open device.".into())
+            DeviceError::Other("Security key error: Failed to open device.".into())
         );
     }
 

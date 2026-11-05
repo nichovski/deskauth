@@ -21,6 +21,8 @@ const MANAGER_IFACE: &str = "net.reactivated.Fprint.Manager";
 const DEVICE_IFACE: &str = "net.reactivated.Fprint.Device";
 const KEYRING_SERVICE: &str = "deskauth";
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Per D-Bus call, so a wedged fprintd cannot hang Claim, VerifyStart, VerifyStop or Release.
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct FprintdFinger;
 
@@ -61,6 +63,9 @@ fn fprint_error(name: &str) -> DeviceError {
         "net.reactivated.Fprint.Error.NoSuchDevice"
         | "org.freedesktop.DBus.Error.ServiceUnknown"
         | "org.freedesktop.DBus.Error.NameHasNoOwner" => DeviceError::NoReader,
+        "org.freedesktop.DBus.Error.NoReply" | "org.freedesktop.DBus.Error.Timeout" => {
+            DeviceError::Timeout
+        }
         "net.reactivated.Fprint.Error.AlreadyInUse" => {
             other("The fingerprint reader is in use by another program.")
         }
@@ -77,6 +82,9 @@ fn fprint_error(name: &str) -> DeviceError {
 fn bus_error(e: zbus::Error) -> DeviceError {
     match e {
         zbus::Error::MethodError(name, _, _) => fprint_error(name.as_str()),
+        zbus::Error::InputOutput(io) if io.kind() == std::io::ErrorKind::TimedOut => {
+            DeviceError::Timeout
+        }
         _ => DeviceError::Other("Could not reach the fingerprint service.".into()),
     }
 }
@@ -106,6 +114,26 @@ fn decode_secret(text: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
     Ok(secret)
 }
 
+/// Checks the stored secret is there and readable before the scan, so a removed item fails
+/// at once, then reads it again only after `scan` succeeds.
+fn read_after_scan(
+    read: impl Fn() -> Result<Zeroizing<String>, keyring::Error>,
+    scan: impl FnOnce() -> Result<(), DeviceError>,
+) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
+    decode_secret(&read().map_err(keyring_error)?)?;
+    scan()?;
+    decode_secret(&read().map_err(keyring_error)?)
+}
+
+async fn system_bus() -> Result<Connection, DeviceError> {
+    zbus::connection::Builder::system()
+        .map_err(bus_error)?
+        .method_timeout(CALL_TIMEOUT)
+        .build()
+        .await
+        .map_err(bus_error)
+}
+
 fn entry(slot_id: &str) -> Result<keyring::Entry, DeviceError> {
     keyring::Entry::new(KEYRING_SERVICE, &format!("fingerprint-{slot_id}")).map_err(keyring_error)
 }
@@ -124,7 +152,7 @@ async fn default_device(conn: &Connection) -> Result<Proxy<'static>, DeviceError
 }
 
 async fn has_enrolled_finger() -> Result<bool, DeviceError> {
-    let conn = Connection::system().await.map_err(bus_error)?;
+    let conn = system_bus().await?;
     let device = default_device(&conn).await?;
     let fingers: Vec<String> = device
         .call("ListEnrolledFingers", &("",))
@@ -135,7 +163,7 @@ async fn has_enrolled_finger() -> Result<bool, DeviceError> {
 
 /// Claims the default reader for the current user, runs one verify and always releases it.
 async fn verify() -> Result<(), DeviceError> {
-    let conn = Connection::system().await.map_err(bus_error)?;
+    let conn = system_bus().await?;
     let device = default_device(&conn).await?;
     device
         .call::<_, _, ()>("Claim", &("",))
@@ -214,9 +242,11 @@ impl Fingerprint for FprintdFinger {
     }
 
     fn unlock(&self, slot_id: &str) -> Result<Zeroizing<[u8; 32]>, DeviceError> {
-        async_io::block_on(verify())?;
-        let text = Zeroizing::new(entry(slot_id)?.get_password().map_err(keyring_error)?);
-        decode_secret(&text)
+        let entry = entry(slot_id)?;
+        read_after_scan(
+            || entry.get_password().map(Zeroizing::new),
+            || async_io::block_on(verify()),
+        )
     }
 
     fn disable(&self, slot_id: &str) -> Result<(), DeviceError> {
@@ -303,6 +333,74 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn call_timeout_is_timeout() {
+        let io = std::io::Error::from(std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            bus_error(zbus::Error::InputOutput(std::sync::Arc::new(io))),
+            DeviceError::Timeout
+        );
+        assert_eq!(
+            fprint_error("org.freedesktop.DBus.Error.NoReply"),
+            DeviceError::Timeout
+        );
+        let other = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert!(matches!(
+            bus_error(zbus::Error::InputOutput(std::sync::Arc::new(other))),
+            DeviceError::Other(_)
+        ));
+    }
+
+    #[test]
+    fn missing_item_fails_before_scan() {
+        let mut scanned = false;
+        let r = read_after_scan(
+            || Err(keyring::Error::NoEntry),
+            || {
+                scanned = true;
+                Ok(())
+            },
+        );
+        assert_eq!(r.err(), Some(DeviceError::NotSetUp));
+        assert!(!scanned);
+    }
+
+    #[test]
+    fn damaged_item_fails_before_scan() {
+        let mut scanned = false;
+        let r = read_after_scan(
+            || Ok(Zeroizing::new("bad".into())),
+            || {
+                scanned = true;
+                Ok(())
+            },
+        );
+        assert!(matches!(r, Err(DeviceError::Other(_))));
+        assert!(!scanned);
+    }
+
+    #[test]
+    fn failed_scan_returns_scan_error() {
+        let text = encode_secret(&[3u8; 32]);
+        let r = read_after_scan(|| Ok(text.clone()), || Err(DeviceError::Timeout));
+        assert_eq!(r.err(), Some(DeviceError::Timeout));
+    }
+
+    #[test]
+    fn good_scan_reads_secret_again() {
+        let text = encode_secret(&[3u8; 32]);
+        let reads = std::cell::Cell::new(0);
+        let r = read_after_scan(
+            || {
+                reads.set(reads.get() + 1);
+                Ok(text.clone())
+            },
+            || Ok(()),
+        );
+        assert_eq!(*r.unwrap(), [3u8; 32]);
+        assert_eq!(reads.get(), 2);
     }
 
     #[test]
