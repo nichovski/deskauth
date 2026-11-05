@@ -5,11 +5,13 @@ use crate::merge::{self, MergeResult};
 use crate::qr;
 use crate::theme::{self, Palette};
 use crate::totp;
-use crate::vault::{self, Vault};
+use crate::unlock::{self, Fingerprint, HmacKey};
+use crate::unlock_commands::{self, blocking, UnlockMethods};
+use crate::vault::{self, Mode, Vault};
 use base64::Engine;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -24,10 +26,20 @@ pub struct AppState {
     pub clipboard: Mutex<Option<arboard::Clipboard>>,
     pub import: Mutex<ImportSession>,
     pub camera: Mutex<Option<CameraHandle>>,
+    pub hmac_key: Arc<dyn HmacKey>,
+    pub fingerprint: Arc<dyn Fingerprint>,
+    /// Held by every command that may write the vault file (unlock can upgrade v1), so two of
+    /// them never race on it. Taken before `vault`, never the other way round. Reads such as
+    /// the 1 s `codes` poll do not take it.
+    pub ops: Mutex<()>,
 }
 
 impl AppState {
     pub fn new(vault_path: PathBuf) -> Self {
+        Self::with_devices(vault_path, Arc::from(unlock::platform_hmac_key()), Arc::from(unlock::platform_fingerprint()))
+    }
+
+    pub fn with_devices(vault_path: PathBuf, hmac_key: Arc<dyn HmacKey>, fingerprint: Arc<dyn Fingerprint>) -> Self {
         AppState {
             vault: Mutex::new(None),
             vault_path,
@@ -35,10 +47,13 @@ impl AppState {
             clipboard: Mutex::new(arboard::Clipboard::new().ok()),
             import: Mutex::new(ImportSession::default()),
             camera: Mutex::new(None),
+            hmac_key,
+            fingerprint,
+            ops: Mutex::new(()),
         }
     }
 
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         *self.last_activity.lock().unwrap() = (Instant::now(), SystemTime::now());
     }
 
@@ -87,7 +102,15 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-const LOCKED: &str = "Vault is locked";
+pub(crate) const LOCKED: &str = "Vault is locked";
+const BUSY: &str = "Another vault change is in progress. Try again.";
+
+/// Takes the file-writer lock without waiting: a YubiKey touch can hold it for 30 s, and sync
+/// commands run on the main thread.
+pub(crate) fn begin(state: &AppState) -> Result<MutexGuard<'_, ()>, String> {
+    state.ops.try_lock().map_err(|_| BUSY.to_string())
+}
+
 const NOT_FOUND: &str = "Account not found";
 
 #[tauri::command]
@@ -105,6 +128,7 @@ pub fn vault_status(state: State<AppState>) -> Result<String, String> {
 // Async so the Argon2 key derivation runs off the main thread.
 #[tauri::command]
 pub async fn vault_create(password: String, state: State<'_, AppState>) -> Result<(), String> {
+    let _ops = begin(&state)?;
     if vault::exists(&state.vault_path) {
         return Err("A vault already exists".into());
     }
@@ -116,6 +140,8 @@ pub async fn vault_create(password: String, state: State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub async fn vault_unlock(password: String, state: State<'_, AppState>) -> Result<(), String> {
+    // Unlocking a v1 file rewrites it as v2.
+    let _ops = begin(&state)?;
     let v = vault::unlock(&state.vault_path, &password).map_err(|e| e.to_string())?;
     *state.vault.lock().unwrap() = Some(v);
     state.touch();
@@ -323,6 +349,7 @@ pub async fn camera_stop(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn import_finish(state: State<'_, AppState>) -> Result<MergeResult, String> {
+    let _ops = begin(&state)?;
     stop_camera(&state);
     let (accounts, skipped_unsupported) = state.import.lock().unwrap().take();
     let result = {
@@ -351,6 +378,7 @@ pub fn account_add_manual(
     period: u64,
     state: State<AppState>,
 ) -> Result<(), String> {
+    let _ops = begin(&state)?;
     {
         let mut guard = state.vault.lock().unwrap();
         let v = guard.as_mut().ok_or(LOCKED)?;
@@ -413,6 +441,7 @@ fn reset_file(unlocked: bool, path: &Path) -> Result<(), String> {
 
 #[tauri::command]
 pub fn account_rename(id: String, issuer: String, name: String, state: State<AppState>) -> Result<(), String> {
+    let _ops = begin(&state)?;
     {
         let mut guard = state.vault.lock().unwrap();
         let v = guard.as_mut().ok_or(LOCKED)?;
@@ -424,6 +453,7 @@ pub fn account_rename(id: String, issuer: String, name: String, state: State<App
 
 #[tauri::command]
 pub fn account_delete(id: String, state: State<AppState>) -> Result<(), String> {
+    let _ops = begin(&state)?;
     {
         let mut guard = state.vault.lock().unwrap();
         let v = guard.as_mut().ok_or(LOCKED)?;
@@ -433,29 +463,63 @@ pub fn account_delete(id: String, state: State<AppState>) -> Result<(), String> 
     Ok(())
 }
 
-// Async so both Argon2 runs (verify, then derive) stay off the main thread; neither holds the vault lock.
+// In password_yubikey mode it asks for a touch of every registered key.
 #[tauri::command]
-pub async fn vault_change_password(
-    current: String,
-    new_password: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    ensure_unlocked(&state)?;
-    // Verify against the file without holding the vault lock; the copy is dropped (and wiped) right away.
-    drop(vault::unlock(&state.vault_path, &current).map_err(|e| e.to_string())?);
-    // Derived before the vault lock is taken, so the slow KDF does not block other commands.
-    let kek = vault::PasswordKek::derive(&new_password).map_err(|e| e.to_string())?;
-    {
-        let mut guard = state.vault.lock().unwrap();
-        let v = guard.as_mut().ok_or(LOCKED)?;
-        v.set_password(kek).map_err(|e| e.to_string())?;
-    }
-    state.touch();
-    Ok(())
+pub async fn vault_change_password(current: String, new_password: String, app: AppHandle) -> Result<(), String> {
+    blocking(app, move |state, emit| unlock_commands::change_password(state, &current, &new_password, emit)).await
+}
+
+#[tauri::command]
+pub async fn unlock_methods(app: AppHandle) -> Result<UnlockMethods, String> {
+    blocking(app, |state, _| unlock_commands::unlock_methods(state)).await
+}
+
+#[tauri::command]
+pub async fn vault_unlock_yubikey(app: AppHandle) -> Result<(), String> {
+    blocking(app, unlock_commands::unlock_yubikey).await
+}
+
+#[tauri::command]
+pub async fn vault_unlock_fingerprint(app: AppHandle) -> Result<(), String> {
+    blocking(app, |state, _| unlock_commands::unlock_fingerprint(state)).await
+}
+
+#[tauri::command]
+pub async fn vault_unlock_two_factor(password: String, app: AppHandle) -> Result<(), String> {
+    blocking(app, move |state, emit| unlock_commands::unlock_two_factor(state, &password, emit)).await
+}
+
+#[tauri::command]
+pub async fn yubikey_add(name: String, password: Option<String>, app: AppHandle) -> Result<(), String> {
+    blocking(app, move |state, emit| unlock_commands::yubikey_add(state, &name, password.as_deref(), emit)).await
+}
+
+#[tauri::command]
+pub async fn yubikey_remove(id: String, app: AppHandle) -> Result<(), String> {
+    blocking(app, move |state, _| unlock_commands::yubikey_remove(state, &id)).await
+}
+
+#[tauri::command]
+pub async fn fingerprint_enable(app: AppHandle) -> Result<(), String> {
+    blocking(app, |state, _| unlock_commands::fingerprint_enable(state)).await
+}
+
+#[tauri::command]
+pub async fn fingerprint_disable(app: AppHandle) -> Result<(), String> {
+    blocking(app, |state, _| unlock_commands::fingerprint_disable(state)).await
+}
+
+#[tauri::command]
+pub async fn set_mode(mode: Mode, password: Option<String>, name: Option<String>, app: AppHandle) -> Result<(), String> {
+    blocking(app, move |state, emit| {
+        unlock_commands::set_mode(state, mode, password.as_deref(), name.as_deref(), emit)
+    })
+    .await
 }
 
 #[tauri::command]
 pub fn vault_reset(state: State<AppState>) -> Result<(), String> {
+    let _ops = begin(&state)?;
     // The guard is held so the vault cannot be unlocked between the check and the delete.
     let guard = state.vault.lock().unwrap();
     reset_file(guard.is_some(), &state.vault_path)

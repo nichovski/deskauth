@@ -8,6 +8,7 @@ pub mod qr;
 pub mod theme;
 pub mod totp;
 pub mod unlock;
+pub mod unlock_commands;
 pub mod vault;
 
 use commands::AppState;
@@ -78,6 +79,15 @@ pub fn run() {
             commands::account_delete,
             commands::vault_change_password,
             commands::vault_reset,
+            commands::unlock_methods,
+            commands::vault_unlock_yubikey,
+            commands::vault_unlock_fingerprint,
+            commands::vault_unlock_two_factor,
+            commands::yubikey_add,
+            commands::yubikey_remove,
+            commands::fingerprint_enable,
+            commands::fingerprint_disable,
+            commands::set_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
