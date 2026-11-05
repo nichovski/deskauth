@@ -73,7 +73,7 @@ Unlocking a v1 file with the password creates a vault key, re-encrypts the accou
 | Platform | Where the 32-byte secret lives | What enforces the fingerprint |
 |---|---|---|
 | Linux | system keyring (Secret Service, e.g. gnome-keyring), item `deskauth / <slot id>` | the app: `fprintd` D-Bus verify must report `verify-match` before the app reads the item |
-| macOS | Keychain item with access control `biometryCurrentSet` | the Secure Enclave (Touch ID) |
+| macOS | Keychain item with access control `biometryCurrentSet` | the Secure Enclave (Touch ID). Needs a signed build; unsigned builds show "Touch ID unlock needs a signed build of Deskauth." |
 | Windows | not stored: KEK = SHA-256(Windows Hello signature of the fixed challenge `"deskauth v2 fingerprint:" + slot id`) | Windows Hello (`KeyCredentialManager`, key name `deskauth-<slot id>`) |
 
 - **Linux honesty note** (shown in Settings next to the switch): any program running as you can read the keyring item while you are logged in, so on Linux the fingerprint is convenience, not extra security.
