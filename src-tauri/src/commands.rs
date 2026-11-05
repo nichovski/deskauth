@@ -444,11 +444,11 @@ pub async fn vault_change_password(
     // Verify against the file without holding the vault lock; the copy is dropped (and wiped) right away.
     drop(vault::unlock(&state.vault_path, &current).map_err(|e| e.to_string())?);
     // Derived before the vault lock is taken, so the slow KDF does not block other commands.
-    let new_key = vault::derive_new_key(&new_password).map_err(|e| e.to_string())?;
+    let kek = vault::PasswordKek::derive(&new_password).map_err(|e| e.to_string())?;
     {
         let mut guard = state.vault.lock().unwrap();
         let v = guard.as_mut().ok_or(LOCKED)?;
-        v.apply_new_key(new_key).map_err(|e| e.to_string())?;
+        v.set_password(kek).map_err(|e| e.to_string())?;
     }
     state.touch();
     Ok(())
