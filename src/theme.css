@@ -428,3 +428,114 @@ button[hidden] {
 .row.editing > :not(.edit) {
   display: none;
 }
+
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings .card {
+  margin: 0 auto;
+}
+
+.settings .card + .card {
+  border-top: 1px solid var(--muted);
+}
+
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#methods {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stack[hidden],
+.actions[hidden],
+.switch[hidden] {
+  display: none;
+}
+
+h2 {
+  margin: 8px 0 0;
+  font-size: 15px;
+  color: var(--fg-bright);
+}
+
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.option > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.option .label {
+  color: var(--fg-bright);
+}
+
+.option .line {
+  font-size: 12px;
+}
+
+.option input,
+.switch input {
+  margin: 3px 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.option:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-bright);
+  cursor: pointer;
+}
+
+.switch input {
+  margin: 0;
+}
+
+.keys {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keys li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.keys button {
+  padding: 4px 10px;
+}
