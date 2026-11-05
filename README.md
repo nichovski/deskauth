@@ -48,7 +48,7 @@ Settings > Unlock methods has three modes:
 
 The YubiKey uses FIDO2 `hmac-secret` with a touch only. Adding a YubiKey asks for your current password, and a key that is already registered is refused. If the key has a FIDO2 PIN, type it in the "YubiKey PIN" field when you register the key. Unlocking never asks for the PIN, only for a touch.
 
-In "Password, YubiKey or fingerprint" the lock screen listens by itself: it starts a fingerprint scan as soon as it shows, and asks for a touch when a registered YubiKey is plugged in. You can type the password at the same time. On Windows the YubiKey still needs a click on "Use YubiKey", so its dialog does not pop up by itself.
+In "Password, YubiKey or fingerprint" the lock screen listens by itself, but only while the Deskauth window is focused: it starts a fingerprint scan, and asks for a touch when a YubiKey is plugged in (any FIDO key is asked; one that is not registered shows "not registered" after the touch). When the window loses focus it lets go of the reader and stops asking the key, so `sudo`, the screen locker and your browser can use them. You can type the password at the same time. On Windows the YubiKey still needs a click on "Use YubiKey", so its dialog does not pop up by itself.
 
 - Linux needs the usual udev rules for FIDO keys. On Arch the `libfido2` package provides them.
 - Windows needs Windows 11 22H2 or later (WebAuthn API v4) for the YubiKey. Windows shows its own touch dialog. The fingerprint uses Windows Hello.
