@@ -7,6 +7,7 @@ pub mod migration;
 pub mod qr;
 pub mod theme;
 pub mod totp;
+pub mod unlock;
 pub mod vault;
 
 use commands::AppState;
