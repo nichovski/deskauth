@@ -41,12 +41,38 @@ fn map_error(msg: &str) -> DeviceError {
         DeviceError::Cancelled
     } else if msg.contains("FIDO device not found") {
         DeviceError::NoDevice
+    } else if [
+        "CTAP2_ERR_PIN_REQUIRED",
+        "CTAP2_ERR_PUAT_REQUIRED",
+        "CTAP2_ERR_PIN_AUTH_INVALID",
+        "CTAP2_ERR_OPERATION_DENIED",
+    ]
+    .iter()
+    .any(|code| msg.contains(code))
+    {
+        DeviceError::Unsupported(
+            "This security key needs its PIN to register, which Deskauth does not support yet."
+                .into(),
+        )
+    } else if msg.contains("CTAP2_ERR_LIMIT_EXCEEDED") {
+        DeviceError::Unsupported(
+            "Too many YubiKeys are registered for this key to check at once.".into(),
+        )
     } else {
         let short = msg
             .split_whitespace()
             .find(|w| w.starts_with("CTAP"))
             .unwrap_or(msg.trim());
         DeviceError::Other(short.to_string())
+    }
+}
+
+/// CTAP2 lets the authenticator omit the credential id when the allow list has exactly one
+/// entry; then that entry is the one it used (libfido2 does the same).
+fn returned_id(returned: Vec<u8>, sent: &[(Vec<u8>, [u8; 32])]) -> Vec<u8> {
+    match sent {
+        [(only, _)] if returned.is_empty() => only.clone(),
+        _ => returned,
     }
 }
 
@@ -97,6 +123,12 @@ fn take_hmac(extensions: &mut [GetExt]) -> Option<Zeroizing<[u8; 32]>> {
     })
 }
 
+fn no_hmac_secret() -> DeviceError {
+    DeviceError::Unsupported(
+        "This security key does not support the hmac-secret feature Deskauth needs.".into(),
+    )
+}
+
 fn has_hmac_secret(extensions: &[MakeExt]) -> bool {
     extensions
         .iter()
@@ -122,7 +154,7 @@ fn probe(dev: &FidoKeyHid, allowed: &[(Vec<u8>, [u8; 32])]) -> Result<Vec<u8>, D
     assertions
         .into_iter()
         .next()
-        .map(|a| a.credential_id)
+        .map(|a| returned_id(a.credential_id, allowed))
         .ok_or(DeviceError::NoCredential)
 }
 
@@ -147,7 +179,7 @@ fn hmac(
             out.get_or_insert(h);
         }
     }
-    out.ok_or_else(|| DeviceError::Other("no hmac-secret output".into()))
+    out.ok_or_else(no_hmac_secret)
 }
 
 impl HmacKey for HidKey {
@@ -176,9 +208,7 @@ impl HmacKey for HidKey {
             .make_credential_with_args(&args)
             .map_err(|e| map_error(&e.to_string()))?;
         if !has_hmac_secret(&att.extensions) {
-            return Err(DeviceError::Unsupported(
-                "This security key does not support hmac-secret.".into(),
-            ));
+            return Err(no_hmac_secret());
         }
         let credential_id = att.credential_descriptor.id;
         let salt = random::<32>();
@@ -250,12 +280,49 @@ mod tests {
     }
 
     #[test]
+    fn pin_and_limit_errors_are_plain_sentences() {
+        let pin = DeviceError::Unsupported(
+            "This security key needs its PIN to register, which Deskauth does not support yet."
+                .into(),
+        );
+        for msg in [
+            "response_status err = 0x36 CTAP2_ERR_PIN_REQUIRED  PIN is required for the selected operation.",
+            "response_status err = 0x36 CTAP2_ERR_PUAT_REQUIRED",
+            "response_status err = 0x33 CTAP2_ERR_PIN_AUTH_INVALID PIN authentication, pinAuth, verification failed.",
+            "response_status err = 0x27 CTAP2_ERR_OPERATION_DENIED  Not authorized for requested operation.",
+        ] {
+            assert_eq!(map_error(msg), pin, "{msg}");
+        }
+        assert_eq!(
+            map_error(
+                "response_status err = 0x15 CTAP2_ERR_LIMIT_EXCEEDED Limit for number of items exceeded."
+            ),
+            DeviceError::Unsupported(
+                "Too many YubiKeys are registered for this key to check at once.".into()
+            )
+        );
+        assert!(
+            matches!(no_hmac_secret(), DeviceError::Unsupported(m) if m.ends_with("Deskauth needs."))
+        );
+    }
+
+    #[test]
+    fn returned_id_fills_omitted_single_credential() {
+        let one = vec![(b"a".to_vec(), [1u8; 32])];
+        assert_eq!(returned_id(vec![], &one), b"a".to_vec());
+        assert_eq!(returned_id(vec![], &allowed()), Vec::<u8>::new());
+        assert_eq!(salt_for(&allowed(), &returned_id(vec![], &allowed())), None);
+        assert_eq!(returned_id(b"b".to_vec(), &one), b"b".to_vec());
+        assert_eq!(returned_id(b"b".to_vec(), &allowed()), b"b".to_vec());
+    }
+
+    #[test]
     fn other_errors_keep_short_text() {
         assert_eq!(
             map_error(
-                "response_status err = 0x36 CTAP2_ERR_PIN_REQUIRED  PIN is required for the selected operation."
+                "response_status err = 0x01 CTAP1_ERR_INVALID_COMMAND The command is not a valid CTAP command."
             ),
-            DeviceError::Other("CTAP2_ERR_PIN_REQUIRED".into())
+            DeviceError::Other("CTAP1_ERR_INVALID_COMMAND".into())
         );
         assert_eq!(
             map_error("Failed to open device."),
