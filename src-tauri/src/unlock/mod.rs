@@ -5,6 +5,9 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod fido_hid;
+
 #[derive(Debug, PartialEq)]
 pub enum DeviceError {
     NoDevice,
@@ -109,6 +112,12 @@ impl Fingerprint for Stub {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn platform_hmac_key() -> Box<dyn HmacKey> {
+    Box::new(fido_hid::HidKey)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn platform_hmac_key() -> Box<dyn HmacKey> {
     Box::new(Stub)
 }
@@ -286,11 +295,9 @@ mod tests {
 
     #[test]
     fn stubs_are_unavailable_and_unsupported() {
-        assert!(!platform_hmac_key().available());
-        assert!(matches!(
-            platform_hmac_key().enroll(),
-            Err(DeviceError::Unsupported(_))
-        ));
+        // The stub directly: on Linux and macOS `platform_hmac_key()` is the real HID device.
+        assert!(!HmacKey::available(&Stub));
+        assert!(matches!(Stub.enroll(), Err(DeviceError::Unsupported(_))));
         let f = platform_fingerprint();
         assert!(!f.available());
         assert!(matches!(f.unlock("s1"), Err(DeviceError::Unsupported(_))));
