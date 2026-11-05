@@ -52,7 +52,9 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
     if (busy) status.textContent = name ? `Touch ${name}` : "Touch your YubiKey";
   });
 
+  /** Runs one unlock with every button disabled; a second one while it runs is ignored. */
   async function attempt(work: () => Promise<void>, statusText = "") {
+    if (busy) return;
     err.textContent = "";
     reset.hidden = true;
     busy = true;
@@ -74,10 +76,11 @@ export function renderUnlock(root: HTMLElement, done: () => void): () => void {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const m = await methods;
     const password = pw.value;
-    if (m?.mode === "password_yubikey") attempt(() => vaultUnlockTwoFactor(password));
-    else attempt(() => vaultUnlock(password));
+    attempt(async () => {
+      const m = await methods;
+      await (m?.mode === "password_yubikey" ? vaultUnlockTwoFactor(password) : vaultUnlock(password));
+    });
   });
   yubikey.addEventListener("click", () => attempt(vaultUnlockYubikey));
   finger.addEventListener("click", () => attempt(vaultUnlockFingerprint, "Scan your finger"));

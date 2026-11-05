@@ -34,8 +34,8 @@ Release builds are unsigned, see [Releases](#releases).
 Read this before you use it.
 
 - The codes live on the same computer as your passwords. If someone gets into this computer, they get both factors.
-- Your master password is the only protection. The vault is an encrypted file (Argon2id key derivation, XChaCha20-Poly1305).
-- There is no recovery. If you forget the master password, the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
+- The vault is an encrypted file (Argon2id key derivation, XChaCha20-Poly1305). What opens it depends on the unlock mode: the password alone, the password or a YubiKey or your fingerprint, or the password and a YubiKey together. See [Unlock with a YubiKey or fingerprint](#unlock-with-a-yubikey-or-fingerprint).
+- There is no recovery. If none of your ways in works any more (for example you forget the password and have no YubiKey or fingerprint set up, or in "Password and YubiKey together" you lose the password or every key), the vault cannot be opened. Delete the vault file (`vault.json`, see below) and import your accounts again.
 - The app locks itself after 5 minutes of no use. A copied code is cleared from the clipboard after 30 seconds.
 
 ## Unlock with a YubiKey or fingerprint
