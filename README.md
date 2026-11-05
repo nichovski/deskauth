@@ -46,7 +46,7 @@ Settings > Unlock methods has three modes:
 - **Password, YubiKey or fingerprint.** Any one of them opens the vault. The password always works, so it is your way back in.
 - **Password and YubiKey together.** You need the password and a touch of a registered YubiKey. Nothing else opens the vault. Register a backup key: if you lose your only key, you lose the vault.
 
-The YubiKey uses FIDO2 `hmac-secret` with a touch only.
+The YubiKey uses FIDO2 `hmac-secret` with a touch only. Adding a YubiKey asks for your current password, and a key that is already registered is refused.
 
 - A FIDO2 PIN on the key is not supported yet.
 - Linux needs the usual udev rules for FIDO keys. On Arch the `libfido2` package provides them.
@@ -57,6 +57,8 @@ The YubiKey uses FIDO2 `hmac-secret` with a touch only.
 On Linux the fingerprint is convenience, not extra security: the secret it guards sits in your keyring, and any program running as you can read it while you are logged in.
 
 Removing a lost YubiKey does not protect old copies of `vault.json`. An old copy plus that key still opens the accounts that existed then. Switching into or out of "Password and YubiKey together" makes a fresh vault key.
+
+The first unlock with this version upgrades `vault.json` to the new format (v2). Older Deskauth versions cannot open a v2 vault, so keep a backup of `vault.json` before that first unlock.
 
 ## Import from Google Authenticator
 
