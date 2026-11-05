@@ -7,10 +7,14 @@ use zeroize::Zeroizing;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod fido_hid;
+#[cfg(any(test, windows))]
+mod fido_windows;
 #[cfg(target_os = "linux")]
 mod finger_linux;
 #[cfg(any(test, target_os = "macos"))]
 mod finger_macos;
+#[cfg(any(test, windows))]
+mod finger_windows;
 
 #[derive(Debug, PartialEq)]
 pub enum DeviceError {
@@ -77,15 +81,15 @@ pub trait Fingerprint: Send + Sync {
 }
 
 /// Used on platforms without a device implementation.
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 struct Stub;
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 fn unsupported() -> DeviceError {
     DeviceError::Unsupported("Not supported on this system.".into())
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 impl HmacKey for Stub {
     fn available(&self) -> bool {
         false
@@ -101,7 +105,7 @@ impl HmacKey for Stub {
     }
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos", windows))))]
 impl Fingerprint for Stub {
     fn available(&self) -> bool {
         false
@@ -125,7 +129,12 @@ pub fn platform_hmac_key() -> Box<dyn HmacKey> {
     Box::new(fido_hid::HidKey)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn platform_hmac_key() -> Box<dyn HmacKey> {
+    Box::new(fido_windows::WebAuthnKey)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn platform_hmac_key() -> Box<dyn HmacKey> {
     Box::new(Stub)
 }
@@ -140,7 +149,12 @@ pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
     Box::new(finger_macos::TouchIdFinger)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
+    Box::new(finger_windows::HelloFinger)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn platform_fingerprint() -> Box<dyn Fingerprint> {
     Box::new(Stub)
 }

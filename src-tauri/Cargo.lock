@@ -1427,6 +1427,7 @@ dependencies = [
  "toml 0.8.23",
  "url",
  "uuid",
+ "windows",
  "zbus 5.19.0",
  "zeroize",
 ]
