@@ -69,6 +69,7 @@ pub fn run() {
             commands::copy_code,
             commands::get_theme,
             commands::import_image,
+            commands::import_text,
             commands::camera_list,
             commands::camera_start,
             commands::camera_stop,

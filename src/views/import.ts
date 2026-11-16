@@ -5,6 +5,7 @@ import {
   importCancel,
   importFinish,
   importImage,
+  importText,
   onCameraFrame,
   type CameraInfo,
   type ImportProgress,
@@ -30,7 +31,7 @@ export function progressText(p: ImportProgress): string {
   return "";
 }
 
-type Mode = "camera" | "image";
+type Mode = "camera" | "image" | "text";
 
 export function renderImport(root: HTMLElement, go: Go): () => void {
   root.innerHTML = `
@@ -38,14 +39,19 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
     <div class="tabs" role="tablist">
       <button id="tab-camera" class="tab" role="tab">Camera</button>
       <button id="tab-image" class="tab" role="tab">Image</button>
+      <button id="tab-text" class="tab" role="tab">Text</button>
     </div>
     <section id="pane-camera" class="pane">
       <select id="cams" hidden></select>
       <div class="preview"><img id="preview" alt="Camera preview" hidden /></div>
     </section>
     <section id="pane-image" class="pane" hidden>
-      <button id="drop" class="drop" type="button">Drop a QR image here, or press Enter to choose a PNG or JPG</button>
+      <button id="drop" class="drop" type="button">Drop or paste (Ctrl+V) a QR image here, or press Enter to choose a PNG or JPG</button>
       <input id="file" type="file" accept="image/png,image/jpeg" multiple hidden />
+    </section>
+    <section id="pane-text" class="pane" hidden>
+      <textarea id="text" spellcheck="false" placeholder="Paste the QR text: otpauth://... or otpauth-migration://... (one per line)"></textarea>
+      <button id="add-text" type="button">Add</button>
     </section>
     <div class="status">
       <p id="progress" class="dim"></p>
@@ -57,12 +63,14 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
       <button id="finish" disabled>Finish import</button>
     </footer>`;
   const $ = <T extends HTMLElement>(id: string) => root.querySelector<T>(`#${id}`)!;
-  const tabs = { camera: $("tab-camera"), image: $("tab-image") };
-  const panes = { camera: $("pane-camera"), image: $("pane-image") };
+  const tabs = { camera: $("tab-camera"), image: $("tab-image"), text: $("tab-text") };
+  const panes = { camera: $("pane-camera"), image: $("pane-image"), text: $("pane-text") };
   const cams = $<HTMLSelectElement>("cams");
   const preview = $<HTMLImageElement>("preview");
   const drop = $("drop");
   const file = $<HTMLInputElement>("file");
+  const text = $<HTMLTextAreaElement>("text");
+  const addText = $<HTMLButtonElement>("add-text");
   const progress = $("progress");
   const result = $("result");
   const err = $("err");
@@ -150,7 +158,7 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
 
   const select = async (m: Mode) => {
     mode = m;
-    for (const k of ["camera", "image"] as const) {
+    for (const k of ["camera", "image", "text"] as const) {
       tabs[k].setAttribute("aria-selected", String(k === m));
       panes[k].hidden = k !== m;
     }
@@ -163,7 +171,7 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
       }
     } else {
       await stopCamera();
-      drop.focus();
+      (m === "image" ? drop : text).focus();
     }
   };
 
@@ -174,6 +182,16 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
       } catch (e) {
         err.textContent = String(e);
       }
+    }
+  };
+
+  const importPasted = async () => {
+    err.textContent = "";
+    try {
+      await apply(await importText(text.value));
+      text.value = "";
+    } catch (e) {
+      err.textContent = String(e);
     }
   };
 
@@ -192,6 +210,8 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
 
   tabs.camera.addEventListener("click", () => select("camera"));
   tabs.image.addEventListener("click", () => select("image"));
+  tabs.text.addEventListener("click", () => select("text"));
+  addText.addEventListener("click", importPasted);
   cams.addEventListener("change", () => startCamera());
   drop.addEventListener("click", () => file.click());
   drop.addEventListener("dragover", (e) => {
@@ -214,6 +234,14 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
     if (e.key === "Escape") go("list");
   };
   window.addEventListener("keydown", onKey);
+  // A screenshot of a QR on the clipboard imports from any tab.
+  const onPaste = (e: ClipboardEvent) => {
+    const files = e.clipboardData?.files;
+    if (!files?.length) return;
+    e.preventDefault();
+    importFiles(files);
+  };
+  window.addEventListener("paste", onPaste);
 
   select("camera");
 
@@ -221,6 +249,7 @@ export function renderImport(root: HTMLElement, go: Go): () => void {
     disposed = true;
     cameraOn = false;
     window.removeEventListener("keydown", onKey);
+    window.removeEventListener("paste", onPaste);
     unlisten.then((off) => off());
     importCancel();
   };

@@ -245,6 +245,12 @@ fn import_bytes(bytes: &[u8], session: &mut ImportSession) -> Result<ImportProgr
     add_decoded(&qr::decode_image_bytes(bytes)?, session)
 }
 
+/// Pasted QR contents: one otpauth:// or otpauth-migration:// link per line.
+fn import_text_into(text: &str, session: &mut ImportSession) -> Result<ImportProgress, String> {
+    let lines: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    add_decoded(&lines, session)
+}
+
 /// Saves the vault; on failure the accounts go back to how they were before.
 fn save_or_revert(vault: &mut Vault, before: usize) -> Result<(), String> {
     vault.save().map_err(|e| {
@@ -293,6 +299,13 @@ pub async fn import_image(bytes: Vec<u8>, state: State<'_, AppState>) -> Result<
     ensure_unlocked(&state)?;
     state.touch();
     import_bytes(&bytes, &mut state.import.lock().unwrap())
+}
+
+#[tauri::command]
+pub async fn import_text(text: String, state: State<'_, AppState>) -> Result<ImportProgress, String> {
+    ensure_unlocked(&state)?;
+    state.touch();
+    import_text_into(&text, &mut state.import.lock().unwrap())
 }
 
 #[tauri::command]
@@ -618,6 +631,21 @@ mod tests {
         blank.write_to(&mut buf, ImageFormat::Png).unwrap();
         let mut session = ImportSession::default();
         assert_eq!(import_bytes(&buf.into_inner(), &mut session), Err("No QR code found in image".into()));
+    }
+
+    #[test]
+    fn pasted_text_imports() {
+        let mut session = ImportSession::default();
+        let p = import_text_into(&format!("  {OTPAUTH}\n"), &mut session).unwrap();
+        assert!(p.complete);
+        assert_eq!(p.accounts, 1);
+    }
+
+    #[test]
+    fn pasted_foreign_text_is_not_supported() {
+        let mut session = ImportSession::default();
+        assert_eq!(import_text_into("https://example.com", &mut session), Err(NOT_SUPPORTED.into()));
+        assert_eq!(import_text_into("", &mut session), Err(NOT_SUPPORTED.into()));
     }
 
     #[test]

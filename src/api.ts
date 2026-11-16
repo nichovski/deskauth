@@ -78,6 +78,7 @@ export const copyCode = (id: string) => invoke<void>("copy_code", { id });
 export const getTheme = () => invoke<Palette>("get_theme");
 export const importImage = (bytes: Uint8Array) =>
   invoke<ImportProgress>("import_image", { bytes: Array.from(bytes) });
+export const importText = (text: string) => invoke<ImportProgress>("import_text", { text });
 export const cameraList = () => invoke<CameraInfo[]>("camera_list");
 export const cameraStart = (index: number) => invoke<void>("camera_start", { index });
 export const cameraStop = () => invoke<void>("camera_stop");
