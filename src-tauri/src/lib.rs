@@ -1,6 +1,7 @@
 pub mod account;
 pub mod camera;
 pub mod commands;
+pub mod export;
 pub mod import;
 pub mod merge;
 pub mod migration;
@@ -34,6 +35,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -90,6 +92,7 @@ pub fn run() {
             commands::fingerprint_enable,
             commands::fingerprint_disable,
             commands::set_mode,
+            commands::vault_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

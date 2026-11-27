@@ -1023,7 +1023,7 @@ impl Vault {
     }
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
     // A unique name in the same directory, so the rename stays on one filesystem and a stale or
     // planted temp file is never reused.
     let suffix: String = random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect();

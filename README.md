@@ -73,6 +73,15 @@ Android blocks screenshots of the export screen, so use the camera there. iOS al
 
 Importing again is safe. It merges into the vault and skips accounts that are already there (matched by secret).
 
+## Export to a password manager
+
+Settings > Export accounts writes every account as an `otpauth://totp/` link, one per line, to a file you pick. Password managers such as Bitwarden accept such a link in a login's TOTP field.
+
+- It asks for your password again. In "Password and YubiKey together" it also asks for a touch of a registered key.
+- On Linux and macOS the file is readable only by you (mode 0600). On Windows it gets the folder's normal permissions.
+- The file is not encrypted. Anyone who reads it can make your codes. Import it, then delete it, and do not save it in a synced folder.
+- Spaces at the start or end of an account name are dropped when a link is read back.
+
 ## Build from source
 
 Needs Node.js 22, Rust (stable) and the Tauri Linux libraries. On Debian/Ubuntu:

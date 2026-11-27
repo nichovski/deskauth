@@ -1,5 +1,6 @@
 use crate::account::{Account, Algorithm};
 use crate::camera::{self, CameraHandle, CameraInfo, Frame};
+use crate::export;
 use crate::import::{ImportProgress, ImportSession};
 use crate::merge::{self, MergeResult};
 use crate::qr;
@@ -15,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
 
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(30);
@@ -469,6 +471,24 @@ pub fn account_delete(id: String, state: State<AppState>) -> Result<(), String> 
 #[tauri::command]
 pub async fn vault_change_password(current: String, new_password: String, app: AppHandle) -> Result<(), String> {
     blocking(app, move |state, emit| unlock_commands::change_password(state, &current, &new_password, emit)).await
+}
+
+const EXPORT_FILE_NAME: &str = "deskauth-export.txt";
+
+/// Checks the password, asks where to save, and writes every account as an otpauth link.
+/// Returns the saved path, or None when the save dialog is cancelled.
+#[tauri::command]
+pub async fn vault_export(password: String, app: AppHandle) -> Result<Option<String>, String> {
+    let password = Zeroizing::new(password);
+    let dialog = app.clone();
+    blocking(app, move |state, emit| {
+        let pick = move || {
+            dialog.dialog().file().set_file_name(EXPORT_FILE_NAME).blocking_save_file().and_then(|p| p.into_path().ok())
+        };
+        let saved = export::export(state, &password, emit, pick)?;
+        Ok(saved.map(|p| p.to_string_lossy().into_owned()))
+    })
+    .await
 }
 
 #[tauri::command]

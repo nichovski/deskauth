@@ -6,6 +6,7 @@ import {
   setMode,
   unlockMethods,
   vaultChangePassword,
+  vaultExport,
   yubikeyAdd,
   yubikeyRemove,
   type Mode,
@@ -109,6 +110,15 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
         </div>
         ${promptHtml("pw-prompt")}
       </form>
+      <form class="card" id="export-form">
+        <h1>Export accounts</h1>
+        <p class="warn">This file holds every secret in plain text. Anyone who can read it can make your codes. Import it into your password manager, then delete it. Do not save it in a synced folder.</p>
+        <input id="export-pw" type="password" placeholder="Current password" autocomplete="current-password" />
+        <p class="error" id="export-err"></p>
+        <p class="ok" id="export-ok"></p>
+        <div class="actions"><button type="submit">Export</button></div>
+        ${promptHtml("export-prompt")}
+      </form>
     </div>`;
   const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
 
@@ -152,6 +162,14 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
   const ok = $("#ok");
   const submit = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
 
+  // Export card.
+  const exportForm = $<HTMLFormElement>("#export-form");
+  const exportPw = $<HTMLInputElement>("#export-pw");
+  const exportPrompt = $("#export-prompt");
+  const exportErr = $("#export-err");
+  const exportOk = $("#export-ok");
+  const exportSubmit = exportForm.querySelector<HTMLButtonElement>("button[type=submit]")!;
+
   let m: UnlockMethods | null = null;
   let busy = false;
   // The prompt below the button of the device call that is running, if any.
@@ -175,13 +193,13 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
    * `scanText` is shown (without the key icon) from the start.
    */
   async function withDevice(prompt: HTMLElement, work: () => Promise<void>, scanText = "") {
-    busy = methods.disabled = submit.disabled = true;
+    busy = methods.disabled = submit.disabled = exportSubmit.disabled = true;
     activePrompt = prompt;
     showPrompt(prompt, scanText, false);
     try {
       await work();
     } finally {
-      busy = methods.disabled = submit.disabled = false;
+      busy = methods.disabled = submit.disabled = exportSubmit.disabled = false;
       activePrompt = null;
       showPrompt(prompt, "");
     }
@@ -360,6 +378,27 @@ export function renderSettings(root: HTMLElement, go: Go): () => void {
     } catch (e) {
       err.textContent = String(e);
       current.select();
+    }
+  });
+
+  exportForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    exportErr.textContent = "";
+    exportOk.textContent = "";
+    if (!exportPw.value) {
+      exportErr.textContent = "Type your password to continue";
+      exportPw.focus();
+      return;
+    }
+    try {
+      await withDevice(exportPrompt, async () => {
+        const path = await vaultExport(exportPw.value);
+        exportPw.value = "";
+        if (path !== null) exportOk.textContent = `Saved to ${path}. Delete it after the import.`;
+      });
+    } catch (e) {
+      exportErr.textContent = String(e);
+      exportPw.select();
     }
   });
 
