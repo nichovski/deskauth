@@ -119,6 +119,16 @@ fn verify_two_factor(state: &AppState, keys: &[YubikeyInfo], password: &str, emi
     Ok(())
 }
 
+/// Proves the password again for the unlocked vault; in two-factor mode a registered key too.
+pub fn verify_identity(state: &AppState, password: &str, emit: Emit) -> Result<(), String> {
+    let info = current_info(state)?;
+    if info.mode == Mode::PasswordYubikey {
+        return verify_two_factor(state, &info.yubikeys, password, emit);
+    }
+    vault::unlock(&state.vault_path, password).map_err(vault_err)?;
+    Ok(())
+}
+
 /// Deletes the OS items of fingerprint slots that are gone. Failures leave only an unused item.
 fn disable_fingerprints(state: &AppState, ids: &[String]) {
     for id in ids {

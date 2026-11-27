@@ -97,6 +97,7 @@ export const accountRename = (id: string, issuer: string, name: string) =>
 export const accountDelete = (id: string) => invoke<void>("account_delete", { id });
 export const vaultChangePassword = (current: string, newPassword: string) =>
   invoke<void>("vault_change_password", { current, newPassword });
+export const vaultExport = (password: string) => invoke<string | null>("vault_export", { password });
 export const vaultReset = () => invoke<void>("vault_reset");
 export const unlockMethods = () => invoke<UnlockMethods>("unlock_methods");
 export const vaultUnlockYubikey = () => invoke<void>("vault_unlock_yubikey");
